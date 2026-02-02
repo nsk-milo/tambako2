@@ -1,0 +1,177 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../lib/generated/prisma"
+  // binaryTargets = ["debian-openssl-1.1.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model categories {
+  category_id Int     @id @default(autoincrement())
+  name        String  @unique @db.VarChar(50)
+  media       media[]
+}
+
+model episodes {
+  episode_id     BigInt    @id @default(autoincrement())
+  season_id      BigInt
+  title          String    @db.VarChar(200)
+  description    String?
+  episode_number Int
+  duration       Int
+  media_id       BigInt
+  media          media     @relation(fields: [media_id], references: [media_id], onDelete: Cascade, onUpdate: NoAction)
+  release_date   DateTime? @db.Date
+  seasons        seasons   @relation(fields: [season_id], references: [season_id], onDelete: Cascade, onUpdate: NoAction)
+  series         series?   @relation(fields: [series_id], references: [series_id])
+  series_id      BigInt?
+
+  @@unique([season_id, episode_number])
+}
+
+model genres {
+  genre_id     Int            @id @default(autoincrement())
+  name         String         @unique @db.VarChar(100)
+  media_genres media_genres[]
+}
+
+model media {
+  media_id           BigInt          @id @default(autoincrement())
+  title              String          @db.VarChar(200)
+  description        String?
+  release_date       DateTime?       @db.Date
+  category_id        Int
+  duration           Int
+  rating             Decimal?        @db.Decimal(2, 1)
+  created_at         DateTime?       @default(now()) @db.Timestamp(6)
+  media_location     String          @db.VarChar
+  thumbnail_location String?         @db.VarChar
+  provider_id        BigInt?
+  categories         categories      @relation(fields: [category_id], references: [category_id], onDelete: NoAction, onUpdate: NoAction)
+  provider           users?          @relation(fields: [provider_id], references: [user_id], onDelete: SetNull, onUpdate: NoAction)
+  media_genres       media_genres[]
+  watch_history      watch_history[]
+  episodes           episodes[]
+  favorites          favorites[]
+}
+
+model media_genres {
+  media_id BigInt
+  genre_id Int
+  genres   genres @relation(fields: [genre_id], references: [genre_id], onDelete: Cascade, onUpdate: NoAction)
+  media    media  @relation(fields: [media_id], references: [media_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([media_id, genre_id])
+}
+
+model seasons {
+  season_id     BigInt     @id @default(autoincrement())
+  season_number Int
+  episodes      episodes[]
+
+  @@unique([season_number])
+}
+
+model series {
+  series_id  BigInt     @id @default(autoincrement())
+  name       String     @db.VarChar
+  created_at DateTime?  @default(now()) @db.Timestamp(6)
+  episodes   episodes[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model subscriptions {
+  subscription_id    Int                  @id @default(autoincrement())
+  type               String               @unique @db.VarChar(20)
+  cost               Decimal              @db.Decimal(10, 2)
+  user_subscriptions user_subscriptions[]
+}
+
+model user_subscriptions {
+  user_subscription_id BigInt         @id @default(autoincrement())
+  user_id              BigInt
+  subscription_id      Int
+  start_date           DateTime       @db.Date
+  end_date             DateTime       @db.Date
+  is_active            Boolean?       @default(true)
+  created_at           DateTime?      @default(now()) @db.Timestamp(6)
+  updated_at           DateTime?      @default(now()) @db.Timestamp(6)
+  subscriptions        subscriptions  @relation(fields: [subscription_id], references: [subscription_id], onDelete: NoAction, onUpdate: NoAction)
+  users                users          @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction)
+  transactions         transactions[]
+}
+
+model users {
+  user_id            BigInt               @id @default(autoincrement())
+  name               String               @db.VarChar(100)
+  email              String               @unique @db.VarChar(150)
+  phone_number       String               @unique @db.VarChar(20)
+  password_hash      String               @db.VarChar(255)
+  created_at         DateTime?            @default(now()) @db.Timestamp(6)
+  user_subscriptions user_subscriptions[]
+  watch_history      watch_history[]
+  transactions       transactions[]
+  favorites          favorites[]
+  provided_media     media[]
+  activity_logs      activity_logs[]
+  role               Role?                @relation(fields: [roleId], references: [id])
+  roleId             Int?
+}
+
+model transactions {
+  transaction_id       BigInt             @id @default(autoincrement())
+  user_id              BigInt
+  user_subscription_id BigInt
+  amount               Decimal            @db.Decimal(10, 2)
+  created_at           DateTime?          @default(now()) @db.Timestamp(6)
+  users                users              @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction)
+  user_subscriptions   user_subscriptions @relation(fields: [user_subscription_id], references: [user_subscription_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model watch_history {
+  history_id BigInt    @id @default(autoincrement())
+  user_id    BigInt
+  media_id   BigInt?
+  watched_at DateTime? @default(now()) @db.Timestamp(6)
+  progress   Int?      @default(0)
+  completed  Boolean?  @default(false)
+  media      media?    @relation(fields: [media_id], references: [media_id], onDelete: Cascade, onUpdate: NoAction)
+  users      users     @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model favorites {
+  favorite_id BigInt   @id @default(autoincrement())
+  user_id     BigInt
+  media_id    BigInt
+  added_at    DateTime @default(now()) @db.Timestamp(6)
+  media       media    @relation(fields: [media_id], references: [media_id], onDelete: Cascade, onUpdate: NoAction)
+  users       users    @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, media_id])
+}
+
+model activity_logs {
+  log_id      BigInt   @id @default(autoincrement())
+  user_id     BigInt
+  action      String   @db.VarChar(50)
+  details     String?  @db.VarChar(255)
+  created_at  DateTime @default(now()) @db.Timestamp(6)
+  users       users    @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model Role {
+  id    Int      @id @default(autoincrement())
+  name  RoleEnum
+  users users[]
+}
+
+enum RoleEnum {
+  ADMIN
+  USER
+  ContentCreator
+}
