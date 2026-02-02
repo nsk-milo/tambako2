@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@/lib/generated/prisma";
+import { PrismaClient, Prisma } from "@/lib/generated/prisma";
 
 const prisma = new PrismaClient();
 
@@ -35,20 +35,26 @@ export async function GET(request: Request) {
       });
     }
 
-    const where = {
-      AND: [
-        search
-          ? {
-              OR: [
-                { name: { contains: search, mode: "insensitive" } },
-                { email: { contains: search, mode: "insensitive" } },
-                { phone_number: { contains: search, mode: "insensitive" } },
-              ],
-            }
-          : {},
-        roleRecord ? { roleId: roleRecord.id } : {},
-      ],
-    } as const;
+    const where: Prisma.usersWhereInput = {};
+    const andClauses: Prisma.usersWhereInput[] = [];
+
+    if (search) {
+      andClauses.push({
+        OR: [
+          { name: { contains: search, mode: "insensitive" } },
+          { email: { contains: search, mode: "insensitive" } },
+          { phone_number: { contains: search, mode: "insensitive" } },
+        ],
+      });
+    }
+
+    if (roleRecord) {
+      andClauses.push({ roleId: roleRecord.id });
+    }
+
+    if (andClauses.length) {
+      where.AND = andClauses;
+    }
 
     const sortField = ["created_at", "name", "email"].includes(sortBy)
       ? (sortBy as "created_at" | "name" | "email")
