@@ -28,11 +28,9 @@ async function ensureUploadsDirExists() {
  * and hits a size limit. Setting bodyParser to `false` allows us to handle the body
  * as a stream directly.
  */
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-};
+// Note: `export const config` with `api.bodyParser` is deprecated in newer Next.js
+// versions. App Route handlers can work with `request.formData()` and streams.
+// We intentionally omit the deprecated `config` export so the route builds cleanly.
 
 export async function POST(request: Request) {
   try {
