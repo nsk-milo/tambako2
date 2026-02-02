@@ -112,6 +112,27 @@ interface SupportSearchResponse {
   subscription: Subscription | null;
 }
 
+interface SupportUserListItem {
+  user_id: string;
+  name: string | null;
+  email: string | null;
+  phone_number: string | null;
+  role: string | null;
+  created_at: string | null;
+}
+
+interface SupportUsersResponse {
+  data: SupportUserListItem[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+    sortBy: string;
+    sortDir: string;
+  };
+}
+
 interface ActivityLogItem {
   id: string;
   userId: string;
@@ -229,6 +250,16 @@ export default function AdminPage() {
   const [roleUpdateMessage, setRoleUpdateMessage] = useState<string | null>(null);
   const [activityLogs, setActivityLogs] = useState<ActivityLogItem[]>([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+  const [supportUsers, setSupportUsers] = useState<SupportUserListItem[]>([]);
+  const [isLoadingSupportUsers, setIsLoadingSupportUsers] = useState(false);
+  const [supportUsersError, setSupportUsersError] = useState<string | null>(null);
+  const [supportUsersSearch, setSupportUsersSearch] = useState("");
+  const [supportUsersRoleFilter, setSupportUsersRoleFilter] = useState("all");
+  const [supportUsersPage, setSupportUsersPage] = useState(1);
+  const [supportUsersPageSize, setSupportUsersPageSize] = useState(10);
+  const [supportUsersTotalPages, setSupportUsersTotalPages] = useState(1);
+  const [supportUsersSortBy, setSupportUsersSortBy] = useState("created_at");
+  const [supportUsersSortDir, setSupportUsersSortDir] = useState("desc");
 
   // State for adding new plan
   const [showAddPlanDialog, setShowAddPlanDialog] = useState(false);
@@ -319,6 +350,7 @@ export default function AdminPage() {
       setTempPassword(null);
       setSupportError(null);
       setRoleUpdateMessage(null);
+      setSupportUsersError(null);
     }
   }, [activeSection]);
 
@@ -550,6 +582,83 @@ export default function AdminPage() {
     } finally {
       setSupportLoading(false);
     }
+  };
+
+  const fetchSupportUsers = async (options?: { page?: number; sortBy?: string; sortDir?: string; pageSize?: number }) => {
+    setIsLoadingSupportUsers(true);
+    setSupportUsersError(null);
+    try {
+      const nextPage = options?.page ?? supportUsersPage;
+      const nextSortBy = options?.sortBy ?? supportUsersSortBy;
+      const nextSortDir = options?.sortDir ?? supportUsersSortDir;
+      const nextPageSize = options?.pageSize ?? supportUsersPageSize;
+      const response = await axios.get<SupportUsersResponse>("/api/admin/support/users", {
+        params: {
+          search: supportUsersSearch || undefined,
+          role: supportUsersRoleFilter !== "all" ? supportUsersRoleFilter : undefined,
+          page: nextPage,
+          pageSize: nextPageSize,
+          sortBy: nextSortBy,
+          sortDir: nextSortDir,
+        },
+      });
+      setSupportUsers(response.data.data);
+      setSupportUsersPage(response.data.pagination.page);
+      setSupportUsersPageSize(response.data.pagination.pageSize);
+      setSupportUsersTotalPages(response.data.pagination.totalPages);
+      setSupportUsersSortBy(response.data.pagination.sortBy);
+      setSupportUsersSortDir(response.data.pagination.sortDir);
+    } catch (error) {
+      console.error("Failed to load support users:", error);
+      setSupportUsersError("Failed to load users.");
+    } finally {
+      setIsLoadingSupportUsers(false);
+    }
+  };
+
+  const handleSupportUsersSearch = () => {
+    setSupportUsersPage(1);
+    fetchSupportUsers({ page: 1 });
+  };
+
+  const handleSupportUsersSortChange = (value: string) => {
+    const [sortBy, sortDir] = value.split("|");
+    setSupportUsersSortBy(sortBy);
+    setSupportUsersSortDir(sortDir);
+  };
+
+  const handleSupportHeaderSort = (field: "name" | "email") => {
+    const nextDir = supportUsersSortBy === field && supportUsersSortDir === "asc" ? "desc" : "asc";
+    setSupportUsersSortBy(field);
+    setSupportUsersSortDir(nextDir);
+    setSupportUsersPage(1);
+    fetchSupportUsers({ page: 1, sortBy: field, sortDir: nextDir });
+  };
+
+  useEffect(() => {
+    if (activeSection !== "support") return;
+    const interval = setInterval(() => {
+      fetchSupportUsers();
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [activeSection, supportUsersSearch, supportUsersRoleFilter, supportUsersPage, supportUsersPageSize, supportUsersSortBy, supportUsersSortDir]);
+
+  const handleSupportUserSelect = (user: SupportUserListItem) => {
+    setSupportResult({
+      user: {
+        user_id: user.user_id,
+        name: user.name,
+        email: user.email,
+        phone_number: user.phone_number,
+        role: user.role,
+      },
+      subscription: null,
+    });
+    setSelectedSupportRole(user.role ?? "USER");
+    setSupportError(null);
+    setRoleUpdateMessage(null);
+    setTempPassword(null);
+    fetchActivityLogs(user.user_id);
   };
 
   const handleRoleUpdate = async (userId: string) => {
@@ -1938,6 +2047,14 @@ export default function AdminPage() {
                       </Button>
                       <Button
                         type="button"
+                        variant="secondary"
+                        onClick={fetchSupportUsers}
+                        disabled={isLoadingSupportUsers}
+                      >
+                        {isLoadingSupportUsers ? "Loading Users..." : "Load Users"}
+                      </Button>
+                      <Button
+                        type="button"
                         variant="outline"
                         onClick={() => {
                           setSupportPhoneNumber("");
@@ -1948,11 +2065,209 @@ export default function AdminPage() {
                           setActivityLogs([]);
                           setRoleUpdateMessage(null);
                           setSelectedSupportRole("USER");
+                          setSupportUsersError(null);
                         }}
                       >
                         Clear
                       </Button>
                     </div>
+                    {supportUsersError && (
+                      <div className="rounded-lg border border-red-400 bg-red-100 p-3 text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-300">
+                        <p>
+                          <strong>Error:</strong> {supportUsersError}
+                        </p>
+                      </div>
+                    )}
+                    <Card className="border border-white/10 bg-background/30">
+                      <CardHeader>
+                        <CardTitle>User Directory</CardTitle>
+                        <CardDescription>Browse recent users and select one</CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="grid gap-3 md:grid-cols-3">
+                          <div className="space-y-2 md:col-span-2">
+                            <Label htmlFor="supportUsersSearch">Search</Label>
+                            <Input
+                              id="supportUsersSearch"
+                              placeholder="Search name, email, or phone"
+                              value={supportUsersSearch}
+                              onChange={(e) => setSupportUsersSearch(e.target.value)}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="supportUsersRole">Role Filter</Label>
+                            <Select
+                              value={supportUsersRoleFilter}
+                              onValueChange={setSupportUsersRoleFilter}
+                            >
+                              <SelectTrigger id="supportUsersRole">
+                                <SelectValue placeholder="All roles" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="all">All</SelectItem>
+                                <SelectItem value="USER">USER</SelectItem>
+                                <SelectItem value="ContentCreator">ContentCreator</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+                        <div className="mt-3 grid gap-3 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label htmlFor="supportUsersSort">Sort By</Label>
+                            <Select
+                              value={`${supportUsersSortBy}|${supportUsersSortDir}`}
+                              onValueChange={handleSupportUsersSortChange}
+                            >
+                              <SelectTrigger id="supportUsersSort">
+                                <SelectValue placeholder="Sort by" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="created_at|desc">Newest</SelectItem>
+                                <SelectItem value="created_at|asc">Oldest</SelectItem>
+                                <SelectItem value="name|asc">Name (A-Z)</SelectItem>
+                                <SelectItem value="name|desc">Name (Z-A)</SelectItem>
+                                <SelectItem value="email|asc">Email (A-Z)</SelectItem>
+                                <SelectItem value="email|desc">Email (Z-A)</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="supportUsersPageSize">Rows per page</Label>
+                            <Select
+                              value={String(supportUsersPageSize)}
+                              onValueChange={(value) => {
+                                const nextSize = Number(value);
+                                setSupportUsersPageSize(nextSize);
+                                setSupportUsersPage(1);
+                                fetchSupportUsers({ page: 1, pageSize: nextSize });
+                              }}
+                            >
+                              <SelectTrigger id="supportUsersPageSize">
+                                <SelectValue placeholder="Rows per page" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="10">10</SelectItem>
+                                <SelectItem value="20">20</SelectItem>
+                                <SelectItem value="50">50</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-3">
+                          <Button
+                            variant="outline"
+                            onClick={handleSupportUsersSearch}
+                            disabled={isLoadingSupportUsers}
+                          >
+                            Apply Filters
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            onClick={() => {
+                              setSupportUsersSearch("");
+                              setSupportUsersRoleFilter("all");
+                              setSupportUsersPage(1);
+                              setSupportUsersSortBy("created_at");
+                              setSupportUsersSortDir("desc");
+                              setSupportUsersPageSize(10);
+                              fetchSupportUsers({ page: 1 });
+                            }}
+                            disabled={isLoadingSupportUsers}
+                          >
+                            Reset
+                          </Button>
+                        </div>
+                        {isLoadingSupportUsers ? (
+                          <div className="space-y-2">
+                            <div className="h-4 w-full animate-pulse rounded bg-muted/50" />
+                            <div className="h-4 w-5/6 animate-pulse rounded bg-muted/50" />
+                          </div>
+                        ) : supportUsers.length > 0 ? (
+                          <div className="overflow-x-auto">
+                            <table className="w-full">
+                              <thead className="bg-muted/30">
+                                <tr>
+                                  <th className="text-left p-3 font-medium">
+                                    <button
+                                      type="button"
+                                      className="inline-flex items-center gap-1 hover:text-primary"
+                                      onClick={() => handleSupportHeaderSort("name")}
+                                    >
+                                      Name
+                                      {supportUsersSortBy === "name" ? (supportUsersSortDir === "asc" ? " ▲" : " ▼") : ""}
+                                    </button>
+                                  </th>
+                                  <th className="text-left p-3 font-medium">
+                                    <button
+                                      type="button"
+                                      className="inline-flex items-center gap-1 hover:text-primary"
+                                      onClick={() => handleSupportHeaderSort("email")}
+                                    >
+                                      Email
+                                      {supportUsersSortBy === "email" ? (supportUsersSortDir === "asc" ? " ▲" : " ▼") : ""}
+                                    </button>
+                                  </th>
+                                  <th className="text-left p-3 font-medium">Phone</th>
+                                  <th className="text-left p-3 font-medium">Role</th>
+                                  <th className="text-left p-3 font-medium">Actions</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {supportUsers.map((user) => (
+                                  <tr
+                                    key={user.user_id}
+                                    className="border-b hover:bg-muted/20"
+                                  >
+                                    <td className="p-3 font-medium">{user.name}</td>
+                                    <td className="p-3 text-sm">{user.email}</td>
+                                    <td className="p-3 text-sm text-muted-foreground">
+                                      {user.phone_number}
+                                    </td>
+                                    <td className="p-3 text-sm">
+                                      {user.role ?? "USER"}
+                                    </td>
+                                    <td className="p-3">
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => handleSupportUserSelect(user)}
+                                      >
+                                        View
+                                      </Button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">No users loaded yet.</p>
+                        )}
+                        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                          <p className="text-xs text-muted-foreground">
+                            Page {supportUsersPage} of {supportUsersTotalPages}
+                          </p>
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={supportUsersPage <= 1 || isLoadingSupportUsers}
+                              onClick={() => fetchSupportUsers({ page: supportUsersPage - 1 })}
+                            >
+                              Previous
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={supportUsersPage >= supportUsersTotalPages || isLoadingSupportUsers}
+                              onClick={() => fetchSupportUsers({ page: supportUsersPage + 1 })}
+                            >
+                              Next
+                            </Button>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
                     {supportError && (
                       <div className="rounded-lg border border-red-400 bg-red-100 p-3 text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-300">
                         <p>
