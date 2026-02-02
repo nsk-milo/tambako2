@@ -2048,7 +2048,7 @@ export default function AdminPage() {
                       <Button
                         type="button"
                         variant="secondary"
-                        onClick={fetchSupportUsers}
+                        onClick={() => fetchSupportUsers()}
                         disabled={isLoadingSupportUsers}
                       >
                         {isLoadingSupportUsers ? "Loading Users..." : "Load Users"}
