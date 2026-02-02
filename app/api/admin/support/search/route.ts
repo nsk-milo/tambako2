@@ -21,6 +21,7 @@ export async function GET(request: Request) {
     const user = await prisma.users.findFirst({
       where: phoneNumber ? { phone_number: phoneNumber } : undefined,
       include: {
+        role: true,
         user_subscriptions: {
           include: { subscriptions: true },
           orderBy: { created_at: "desc" },
@@ -33,7 +34,12 @@ export async function GET(request: Request) {
           where: { user_subscription_id: BigInt(subscriptionIdNum) },
           include: {
             subscriptions: true,
-            users: { include: { user_subscriptions: { include: { subscriptions: true } } } },
+            users: {
+              include: {
+                role: true,
+                user_subscriptions: { include: { subscriptions: true } },
+              },
+            },
           },
         })
       : null;
@@ -56,6 +62,7 @@ export async function GET(request: Request) {
         name: selectedUser.name,
         email: selectedUser.email,
         phone_number: selectedUser.phone_number,
+        role: selectedUser.role?.name ?? null,
         activeSubscription,
       },
       subscription,

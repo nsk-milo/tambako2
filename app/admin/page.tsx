@@ -96,6 +96,7 @@ interface SupportUser {
   name: string | null;
   email: string | null;
   phone_number: string | null;
+  role?: string | null;
   activeSubscription?: {
     user_subscription_id: string;
     subscription_id: number;
@@ -223,6 +224,9 @@ export default function AdminPage() {
   const [tempPassword, setTempPassword] = useState<string | null>(null);
   const [isResettingPassword, setIsResettingPassword] = useState(false);
   const [isReactivating, setIsReactivating] = useState(false);
+  const [selectedSupportRole, setSelectedSupportRole] = useState<string>("USER");
+  const [isUpdatingRole, setIsUpdatingRole] = useState(false);
+  const [roleUpdateMessage, setRoleUpdateMessage] = useState<string | null>(null);
   const [activityLogs, setActivityLogs] = useState<ActivityLogItem[]>([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
 
@@ -314,6 +318,7 @@ export default function AdminPage() {
     if (activeSection === "support") {
       setTempPassword(null);
       setSupportError(null);
+      setRoleUpdateMessage(null);
     }
   }, [activeSection]);
 
@@ -517,6 +522,7 @@ export default function AdminPage() {
     setSupportError(null);
     setSupportResult(null);
     setTempPassword(null);
+    setRoleUpdateMessage(null);
 
     try {
       const response = await axios.get<SupportSearchResponse>("/api/admin/support/search", {
@@ -526,6 +532,11 @@ export default function AdminPage() {
         },
       });
       setSupportResult(response.data);
+      if (response.data.user?.role) {
+        setSelectedSupportRole(response.data.user.role);
+      } else {
+        setSelectedSupportRole("USER");
+      }
       if (response.data.user?.user_id) {
         fetchActivityLogs(response.data.user.user_id);
       }
@@ -538,6 +549,36 @@ export default function AdminPage() {
       );
     } finally {
       setSupportLoading(false);
+    }
+  };
+
+  const handleRoleUpdate = async (userId: string) => {
+    setIsUpdatingRole(true);
+    setSupportError(null);
+    setRoleUpdateMessage(null);
+
+    try {
+      const response = await axios.post("/api/admin/support/role", {
+        userId,
+        role: selectedSupportRole,
+      });
+      setSupportResult((prev) =>
+        prev?.user
+          ? {
+              ...prev,
+              user: {
+                ...prev.user,
+                role: response.data?.user?.role ?? selectedSupportRole,
+              },
+            }
+          : prev
+      );
+      setRoleUpdateMessage("Role updated successfully.");
+    } catch (error) {
+      console.error("Role update failed:", error);
+      setSupportError("Failed to update role.");
+    } finally {
+      setIsUpdatingRole(false);
     }
   };
 
@@ -1905,6 +1946,8 @@ export default function AdminPage() {
                           setSupportError(null);
                           setTempPassword(null);
                           setActivityLogs([]);
+                          setRoleUpdateMessage(null);
+                          setSelectedSupportRole("USER");
                         }}
                       >
                         Clear
@@ -1938,6 +1981,29 @@ export default function AdminPage() {
                               <p className="font-medium">{supportResult.user.phone_number}</p>
                             </div>
                           </div>
+                          <div className="grid gap-3 md:grid-cols-2">
+                            <div>
+                              <p className="text-sm text-muted-foreground">Current Role</p>
+                              <p className="font-medium">
+                                {supportResult.user.role ?? "USER"}
+                              </p>
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="supportRole">Update Role</Label>
+                              <Select
+                                value={selectedSupportRole}
+                                onValueChange={setSelectedSupportRole}
+                              >
+                                <SelectTrigger id="supportRole">
+                                  <SelectValue placeholder="Select role" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="USER">USER</SelectItem>
+                                  <SelectItem value="ContentCreator">ContentCreator</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
                           <div className="rounded-md border border-border/60 p-3">
                             <p className="text-sm text-muted-foreground">Active Subscription</p>
                             {supportResult.user.activeSubscription ? (
@@ -1968,7 +2034,19 @@ export default function AdminPage() {
                             >
                               {isReactivating ? "Reactivating..." : "Reactivate Account"}
                             </Button>
+                            <Button
+                              variant="secondary"
+                              onClick={() => supportResult.user && handleRoleUpdate(supportResult.user.user_id)}
+                              disabled={isUpdatingRole}
+                            >
+                              {isUpdatingRole ? "Updating Role..." : "Update Role"}
+                            </Button>
                           </div>
+                          {roleUpdateMessage && (
+                            <div className="rounded-md border border-green-500/40 bg-green-50 p-3 text-green-700">
+                              <p className="text-sm font-semibold">{roleUpdateMessage}</p>
+                            </div>
+                          )}
                           {tempPassword && (
                             <div className="rounded-md border border-green-500/40 bg-green-50 p-3 text-green-700">
                               <p className="text-sm font-semibold">Temporary Password</p>
