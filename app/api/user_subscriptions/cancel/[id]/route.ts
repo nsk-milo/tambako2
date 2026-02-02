@@ -1,11 +1,11 @@
 import { PrismaClient } from "@/lib/generated/prisma";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 const prisma = new PrismaClient();
 
-export async function PATCH(request: Request, context: any) {
+export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const awaitedParams = await context?.params?.id;
+    const { id: awaitedParams } = await params;
     // Get the latest subscription for the user
     const latestSubscription = await prisma.user_subscriptions.findFirst({
       where: {

@@ -1,18 +1,18 @@
 import { getUserDataFromToken } from "@/lib/auth"
 import { Prisma, PrismaClient } from "@/lib/generated/prisma"
-import { NextResponse } from "next/server"
+import { NextRequest, NextResponse } from "next/server"
 import { unlink } from "fs/promises";
 import path from "path";
 
 const prisma = new PrismaClient()
 
-type MediaRouteContext = { params: { id: string } };
+type MediaRouteContext = { params: Promise<{ id: string }> };
 
-export async function GET(request: Request, context: MediaRouteContext) {
+export async function GET(request: NextRequest, context: MediaRouteContext) {
 
   try {
    
-    const awaitedParams = await Promise.resolve(context.params).then((params) => params.id);
+    const { id: awaitedParams } = await context.params;
     console.log("Fetching media details for ID:", awaitedParams);
     const user = await getUserDataFromToken()
 
@@ -84,9 +84,10 @@ export async function GET(request: Request, context: MediaRouteContext) {
   }
 }
 
-export async function DELETE(req: Request, context: MediaRouteContext) {
+export async function DELETE(req: NextRequest, context: MediaRouteContext) {
   try {
-    const mediaId = parseInt(context.params.id, 10);
+    const { id } = await context.params;
+    const mediaId = parseInt(id, 10);
     if (isNaN(mediaId)) {
       return NextResponse.json({ error: "Invalid media ID" }, { status: 400 });
     }

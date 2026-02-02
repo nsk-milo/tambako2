@@ -1,11 +1,11 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { PrismaClient } from "@/lib/generated/prisma";
 import { getProviderAnalytics } from "@/lib/analytics";
 
 const prisma = new PrismaClient();
 
-export async function GET(request: Request, { params }: { params: { providerId: string } }) {
-  const { providerId } = await Promise.resolve(params);
+export async function GET(request: NextRequest, { params }: { params: Promise<{ providerId: string }> }) {
+  const { providerId } = await params;
 
   if (!providerId) {
     return NextResponse.json({ error: "providerId is required" }, { status: 400 });

@@ -368,7 +368,7 @@ export default function AdminPage() {
 
   const updateFormData = (
     field: keyof MediaUpload,
-    value: string | File | null
+    value: string | File | File[] | null
   ) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
   };
@@ -1956,14 +1956,14 @@ export default function AdminPage() {
                           <div className="flex flex-wrap gap-3">
                             <Button
                               variant="outline"
-                              onClick={() => handleResetPassword(supportResult.user.user_id)}
+                              onClick={() => supportResult.user && handleResetPassword(supportResult.user.user_id)}
                               disabled={isResettingPassword}
                             >
                               {isResettingPassword ? "Resetting..." : "Reset Password"}
                             </Button>
                             <Button
                               variant="default"
-                              onClick={() => handleReactivate(supportResult.user.user_id)}
+                              onClick={() => supportResult.user && handleReactivate(supportResult.user.user_id)}
                               disabled={isReactivating}
                             >
                               {isReactivating ? "Reactivating..." : "Reactivate Account"}

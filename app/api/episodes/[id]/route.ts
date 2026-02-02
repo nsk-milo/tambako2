@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 import { PrismaClient } from "@/lib/generated/prisma";
 
@@ -14,8 +14,8 @@ interface Episode {
   thumbnail: string;
 }
 
-export async function GET(request: Request, context: any) {
-  const awaitedParams = await context!.params!.id;
+export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id: awaitedParams } = await params;
   console.log("Fetching episode details for ID:", awaitedParams);
 
   try {

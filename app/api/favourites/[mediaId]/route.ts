@@ -1,12 +1,12 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { PrismaClient } from "@/lib/generated/prisma";
 import { getUserDataFromToken } from "@/lib/auth";
 
 const prisma = new PrismaClient();
 
-export async function GET(request: Request, context: any) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ mediaId: string }> }) {
   try {
-        const mediaId = await context?.params?.mediaId;
+        const { mediaId } = await params;
 
 
     console.log("Checking favorite status for media ID:", mediaId);

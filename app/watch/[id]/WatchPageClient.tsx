@@ -126,7 +126,7 @@ export default function WatchPageClient({ id }: { id: string }) {
     const sortedSources = [...sources].filter((source) => source.quality !== "auto");
     if (!sortedSources.length) return sources[0];
 
-    const downlink = navigator.connection?.downlink ?? 5;
+    const downlink = (navigator as any).connection?.downlink ?? 5;
     if (downlink >= 8) {
       return sortedSources.find((source) => source.quality === "1080p") || sortedSources[0];
     }
