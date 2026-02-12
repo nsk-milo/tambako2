@@ -1,20 +1,7 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
-import axios from "axios";
+import React, { useMemo } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
 
 type ContentItem = {
   id: string;
@@ -33,44 +20,12 @@ type Props = {
 };
 
 export default function ContentProviderContentListClient({ initialItems, noContentMessage }: Props) {
-  const [items, setItems] = useState<ContentItem[]>(initialItems);
-  const [withdrawError, setWithdrawError] = useState<string | null>(null);
-  const [withdrawingId, setWithdrawingId] = useState<string | null>(null);
+  const items = useMemo(() => initialItems, [initialItems]);
 
   const hasItems = useMemo(() => items.length > 0, [items.length]);
 
-  const handleWithdraw = async (contentId: string) => {
-    setWithdrawError(null);
-    setWithdrawingId(contentId);
-
-    try {
-      await axios.delete(`/api/media/${contentId}`);
-      setItems((prev) => prev.filter((item) => item.id !== contentId));
-    } catch (error) {
-      if (axios.isAxiosError(error) && error.response?.data?.error) {
-        setWithdrawError(error.response.data.error);
-      } else {
-        setWithdrawError(error instanceof Error ? error.message : "Failed to withdraw content.");
-      }
-    } finally {
-      setWithdrawingId(null);
-    }
-  };
-
   return (
     <>
-      {withdrawError && (
-        <Card className="border-red-200 dark:border-red-900 mb-6">
-          <CardHeader>
-            <CardTitle>Withdraw Error</CardTitle>
-            <CardDescription>We could not withdraw your content right now.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <p className="text-red-600 dark:text-red-400">{withdrawError}</p>
-          </CardContent>
-        </Card>
-      )}
-
       {!hasItems ? (
         <Card>
           <CardHeader>
@@ -94,28 +49,6 @@ export default function ContentProviderContentListClient({ initialItems, noConte
                       {item.duration ? `${item.duration} minutes` : "Live content"}
                     </CardDescription>
                   </div>
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild>
-                      <Button variant="destructive" size="sm" disabled={withdrawingId === item.id}>
-                        {withdrawingId === item.id ? "Withdrawing..." : "Withdraw"}
-                      </Button>
-                    </AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>Withdraw this content?</AlertDialogTitle>
-                        <AlertDialogDescription>
-                          This will permanently remove <span className="font-semibold text-foreground">{item.title}</span> from the platform.
-                          This action cannot be undone.
-                        </AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction onClick={() => handleWithdraw(item.id)}>
-                          Confirm Withdraw
-                        </AlertDialogAction>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
                 </div>
               </CardHeader>
               <CardContent>

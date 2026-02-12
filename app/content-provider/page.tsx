@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { getUserDataFromToken } from "@/lib/auth";
 import ContentProviderUploadClient from "@/app/content-provider/ContentProviderUploadClient";
 import ContentProviderContentListClient from "@/app/content-provider/ContentProviderContentListClient";
+import ContentProviderWithdrawalClient from "@/app/content-provider/ContentProviderWithdrawalClient";
 
 type ContentItem = {
   id: string;
@@ -157,6 +158,8 @@ export default async function ContentProvider() {
           <div className="mb-10">
             <ContentProviderUploadClient />
           </div>
+
+          <ContentProviderWithdrawalClient />
 
           {/* Content Performance Section */}
           <div>
