@@ -20,13 +20,19 @@ export async function GET(request: NextRequest, context: MediaRouteContext) {
       return NextResponse.json({ error: "Authentication required." }, { status: 401 })
     }
 
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
     const activeSubscription = await prisma.user_subscriptions.findFirst({
       where: {
-        user_id: parseInt(user.userId),
+        user_id: BigInt(user.userId),
         is_active: true,
         end_date: {
-          gte: new Date(),
+          gte: today,
         },
+      },
+      orderBy: {
+        end_date: "desc",
       },
     })
 
@@ -86,6 +92,11 @@ export async function GET(request: NextRequest, context: MediaRouteContext) {
 
 export async function DELETE(req: NextRequest, context: MediaRouteContext) {
   try {
+    const user = await getUserDataFromToken();
+    if (!user) {
+      return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+    }
+
     const { id } = await context.params;
     const mediaId = parseInt(id, 10);
     if (isNaN(mediaId)) {
@@ -96,6 +107,8 @@ export async function DELETE(req: NextRequest, context: MediaRouteContext) {
     const mediaItem = await prisma.media.findFirst({
       where: { media_id: mediaId },
       select: {
+        media_id: true,
+        provider_id: true,
         media_location: true,
         thumbnail_location: true,
       },
@@ -106,11 +119,25 @@ export async function DELETE(req: NextRequest, context: MediaRouteContext) {
       return NextResponse.json({ message: "Media already deleted" }, { status: 200 });
     }
 
+    const isAdmin = user.role === "ADMIN";
+    const isOwner =
+      user.role === "ContentCreator" &&
+      mediaItem.provider_id !== null &&
+      mediaItem.provider_id.toString() === user.userId;
+
+    if (!isAdmin && !isOwner) {
+      return NextResponse.json(
+        { error: "You do not have permission to withdraw this content." },
+        { status: 403 }
+      );
+    }
+
     // 2. Delete physical files from the server
     const { media_location, thumbnail_location } = mediaItem;
 
     if (media_location) {
-      const mediaPath = path.join(process.cwd(), "public", media_location);
+      const safeMediaLocation = media_location.replace(/^\/+/, "");
+      const mediaPath = path.join(process.cwd(), "public", safeMediaLocation);
       try {
         await unlink(mediaPath);
       } catch (fileError) {
@@ -122,7 +149,8 @@ export async function DELETE(req: NextRequest, context: MediaRouteContext) {
     }
 
     if (thumbnail_location) {
-      const thumbnailPath = path.join(process.cwd(), "public", thumbnail_location);
+      const safeThumbnailLocation = thumbnail_location.replace(/^\/+/, "");
+      const thumbnailPath = path.join(process.cwd(), "public", safeThumbnailLocation);
       try {
         await unlink(thumbnailPath);
       } catch (fileError) {

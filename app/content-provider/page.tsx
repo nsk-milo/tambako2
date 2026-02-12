@@ -3,6 +3,7 @@ import React from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { getUserDataFromToken } from "@/lib/auth";
 import ContentProviderUploadClient from "@/app/content-provider/ContentProviderUploadClient";
+import ContentProviderContentListClient from "@/app/content-provider/ContentProviderContentListClient";
 
 type ContentItem = {
   id: string;
@@ -160,81 +161,10 @@ export default async function ContentProvider() {
           {/* Content Performance Section */}
           <div>
             <h2 className="text-2xl font-bold mb-4">Content Performance</h2>
-            {contentItems.length === 0 ? (
-              <Card>
-                <CardHeader>
-                  <CardTitle>No Content Found</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-muted-foreground">
-                    {noContentMessage || "You haven't uploaded any content yet. Start uploading to see analytics here."}
-                  </p>
-                </CardContent>
-              </Card>
-            ) : (
-              <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
-                {contentItems.map((item) => (
-                  <Card key={item.id} className="overflow-hidden hover:shadow-lg transition-shadow">
-                    <CardHeader>
-                      <div className="flex justify-between items-start">
-                        <div className="flex-1">
-                          <CardTitle className="truncate">{item.title}</CardTitle>
-                          <CardDescription>
-                            {item.duration ? `${item.duration} minutes` : "Live content"}
-                          </CardDescription>
-                        </div>
-                      </div>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="space-y-3">
-                        {/* Views Section */}
-                        <div className="border-t pt-3">
-                          <h4 className="text-sm font-semibold text-foreground mb-2">Views</h4>
-                          <div className="grid grid-cols-2 gap-3 text-sm">
-                            <div>
-                              <p className="text-muted-foreground">Total Views</p>
-                              <p className="text-lg font-semibold">{item.totalViews.toLocaleString()}</p>
-                            </div>
-                            <div>
-                              <p className="text-muted-foreground">Unique Views</p>
-                              <p className="text-lg font-semibold">{item.uniqueViews.toLocaleString()}</p>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Engagement Section */}
-                        <div className="border-t pt-3">
-                          <h4 className="text-sm font-semibold text-foreground mb-2">Engagement</h4>
-                          <div className="space-y-2">
-                            <div className="flex justify-between items-center text-sm">
-                              <p className="text-muted-foreground">Minutes Consumed</p>
-                              <p className="font-semibold">{item.minutesConsumed.toLocaleString()} mins</p>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Revenue Section */}
-                        <div className="border-t pt-3 bg-accent/30 dark:bg-accent/10 -mx-6 -mb-6 px-6 py-3">
-                          <div className="flex justify-between items-center">
-                            <div>
-                              <p className="text-sm text-muted-foreground">Revenue (50% Share)</p>
-                              <p className="text-2xl font-bold text-primary">K{item.revenueEarned.toFixed(2)}</p>
-                              {item.monthlyEarnings !== undefined && (
-                                <p className="text-xs text-muted-foreground">Monthly: K{item.monthlyEarnings.toFixed(2)}</p>
-                              )}
-                            </div>
-                            <div className="text-right text-xs text-muted-foreground">
-                              <p>Your earnings</p>
-                              <p>this month</p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
-            )}
+            <ContentProviderContentListClient
+              initialItems={contentItems}
+              noContentMessage={noContentMessage}
+            />
           </div>
         </div>
       </main>
