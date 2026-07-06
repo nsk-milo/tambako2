@@ -42,3 +42,7 @@ next-env.d.ts
 
 /lib/generated/prisma
 ./next
+
+# uploaded media (local runtime data)
+/public/uploads/*
+!/public/uploads/.gitkeep

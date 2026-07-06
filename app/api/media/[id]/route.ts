@@ -129,14 +129,14 @@ export async function DELETE(req: NextRequest, context: MediaRouteContext) {
       );
     }
 
-    // 2. Delete files from Firebase Storage
+    // 2. Delete files from public/uploads
     const { media_location, thumbnail_location } = mediaItem;
 
     if (media_location) {
       try {
         await firebaseStorageService.deleteFile(media_location);
       } catch (fileError) {
-        console.error("Failed to delete media file from Firebase Storage:", fileError);
+        console.error("Failed to delete media file from public/uploads:", fileError);
       }
     }
 
@@ -144,7 +144,7 @@ export async function DELETE(req: NextRequest, context: MediaRouteContext) {
       try {
         await firebaseStorageService.deleteFile(thumbnail_location);
       } catch (fileError) {
-        console.error("Failed to delete thumbnail file from Firebase Storage:", fileError);
+        console.error("Failed to delete thumbnail file from public/uploads:", fileError);
       }
     }
 

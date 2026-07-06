@@ -1,153 +1,81 @@
-import { cert, getApps, initializeApp } from "firebase-admin/app";
-import { getStorage } from "firebase-admin/storage";
-import { randomUUID } from "crypto";
+import { mkdir, writeFile, unlink } from "fs/promises";
+import path from "path";
 
-type ServiceAccountConfig = {
-  projectId: string;
-  clientEmail: string;
-  privateKey: string;
-};
+// Root directory (under Next.js `public/`) that all uploads are written to.
+// Files written here are served publicly at `/uploads/...`.
+const PUBLIC_DIR = path.join(process.cwd(), "public");
+const UPLOADS_ROOT = path.join(PUBLIC_DIR, "uploads");
 
-function getProjectId() {
-  const projectId =
-    process.env.FIREBASE_PROJECT_ID ||
-    process.env.GOOGLE_CLOUD_PROJECT ||
-    process.env.GCLOUD_PROJECT ||
-    process.env.GOOGLE_DRIVE_CLIENT_EMAIL?.split("@")[1]?.split(".")[0];
-
-  if (!projectId) {
-    throw new Error("Missing FIREBASE_PROJECT_ID");
-  }
-
-  return projectId;
+function sanitizeSegment(segment: string) {
+  // Strip leading/trailing slashes and collapse any `..` traversal attempts.
+  return segment
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .filter((part) => part && part !== "." && part !== "..")
+    .join("/");
 }
 
-function getServiceAccountConfig(): ServiceAccountConfig {
-  const projectId = getProjectId();
-  const clientEmail =
-    process.env.FIREBASE_CLIENT_EMAIL || process.env.GOOGLE_DRIVE_CLIENT_EMAIL;
-  const privateKey = (
-    process.env.FIREBASE_PRIVATE_KEY || process.env.GOOGLE_DRIVE_PRIVATE_KEY
-  )?.replace(/\\n/g, "\n");
-
-  if (!clientEmail || !privateKey) {
-    throw new Error("Missing Firebase service account credentials");
-  }
-
-  return { projectId, clientEmail, privateKey };
+function toPublicUrl(relativePath: string) {
+  return `/${["uploads", relativePath].filter(Boolean).join("/")}`.replace(/\\/g, "/");
 }
 
-function getBucketName(projectId: string) {
-  return (
-    process.env.FIREBASE_STORAGE_BUCKET || `${projectId}.firebasestorage.app`
-  );
-}
-
-function normalizeStoragePath(fileName: string, folderPath?: string) {
-  const normalizedFolder = folderPath
-    ?.replace(/^gs:\/\/[^/]+\//, "")
-    .replace(/^\/+|\/+$/g, "");
-  const normalizedFileName = fileName.replace(/^\/+/g, "");
-
-  return [normalizedFolder, normalizedFileName].filter(Boolean).join("/");
-}
-
-function toFirebaseDownloadUrl(bucketName: string, filePath: string, token: string) {
-  return `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(
-    filePath,
-  )}?alt=media&token=${token}`;
-}
-
-function extractStoragePath(fileUrlOrPath: string, bucketName: string) {
-  if (!fileUrlOrPath) return null;
-
-  if (fileUrlOrPath.startsWith("gs://")) {
-    const withoutScheme = fileUrlOrPath.slice("gs://".length);
-    const slashIndex = withoutScheme.indexOf("/");
-    return slashIndex === -1 ? null : withoutScheme.slice(slashIndex + 1);
-  }
-
-  try {
-    const url = new URL(fileUrlOrPath);
-
-    if (url.hostname === "firebasestorage.googleapis.com") {
-      const match = url.pathname.match(/\/o\/(.+)$/);
-      return match ? decodeURIComponent(match[1]) : null;
-    }
-
-    if (url.hostname === "storage.googleapis.com") {
-      const pathParts = url.pathname.split("/").filter(Boolean);
-      if (pathParts[0] === bucketName) {
-        return decodeURIComponent(pathParts.slice(1).join("/"));
-      }
-    }
-  } catch {
-    return fileUrlOrPath.replace(/^\/+/, "");
-  }
-
-  return null;
-}
-
-export class FirebaseStorageService {
-  private bucketName: string;
-
-  constructor() {
-    const serviceAccount = getServiceAccountConfig();
-    this.bucketName = getBucketName(serviceAccount.projectId);
-
-    if (!getApps().length) {
-      initializeApp({
-        credential: cert(serviceAccount),
-        storageBucket: this.bucketName,
-      });
-    }
-  }
-
+export class LocalStorageService {
   async uploadFile(
     file: File,
     fileName: string,
-    mimeType: string,
+    _mimeType: string,
     folderPath?: string,
   ): Promise<string> {
     try {
-      const storagePath = normalizeStoragePath(fileName, folderPath);
-      const token = randomUUID();
+      const folder = folderPath ? sanitizeSegment(folderPath) : "";
+      const safeFileName = sanitizeSegment(fileName);
+      const relativePath = [folder, safeFileName].filter(Boolean).join("/");
+
+      const destination = path.join(UPLOADS_ROOT, relativePath);
       const buffer = Buffer.from(await file.arrayBuffer());
-      const storageFile = getStorage().bucket(this.bucketName).file(storagePath);
 
-      await storageFile.save(buffer, {
-        metadata: {
-          contentType: mimeType,
-          cacheControl: "public, max-age=31536000",
-          metadata: {
-            firebaseStorageDownloadTokens: token,
-          },
-        },
-      });
+      await mkdir(path.dirname(destination), { recursive: true });
+      await writeFile(destination, buffer);
 
-      return toFirebaseDownloadUrl(this.bucketName, storagePath, token);
+      // Return the public URL Next.js serves the file from.
+      return toPublicUrl(relativePath);
     } catch (error) {
-      console.error("Error uploading to Firebase Storage:", error);
-      throw new Error("Failed to upload file to Firebase Storage");
+      console.error("Error writing upload to public/uploads:", error);
+      throw new Error("Failed to save uploaded file");
     }
   }
 
   async deleteFile(fileUrlOrPath: string): Promise<void> {
+    if (!fileUrlOrPath) return;
+
+    // Only local uploads paths can be deleted. Anything else (e.g. legacy
+    // remote URLs on old records) is ignored rather than treated as an error.
+    let relativePath: string | null = null;
+
     try {
-      const storagePath = extractStoragePath(fileUrlOrPath, this.bucketName);
+      const pathname = fileUrlOrPath.startsWith("http")
+        ? new URL(fileUrlOrPath).pathname
+        : fileUrlOrPath;
 
-      if (!storagePath) {
-        throw new Error("Could not determine Firebase Storage file path");
-      }
+      const match = pathname.match(/\/?uploads\/(.+)$/);
+      relativePath = match ? sanitizeSegment(match[1]) : null;
+    } catch {
+      relativePath = null;
+    }
 
-      await getStorage().bucket(this.bucketName).file(storagePath).delete({
-        ignoreNotFound: true,
-      });
-    } catch (error) {
-      console.error("Error deleting from Firebase Storage:", error);
-      throw new Error("Failed to delete file from Firebase Storage");
+    if (!relativePath) return;
+
+    try {
+      await unlink(path.join(UPLOADS_ROOT, relativePath));
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
+      console.error("Error deleting file from public/uploads:", error);
+      throw new Error("Failed to delete uploaded file");
     }
   }
 }
 
-export const firebaseStorageService = new FirebaseStorageService();
+export const localStorageService = new LocalStorageService();
+
+// Backwards-compatible alias so existing imports keep working.
+export const firebaseStorageService = localStorageService;

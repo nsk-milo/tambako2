@@ -44,9 +44,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
-    // --- File Upload to Firebase Storage ---
+    // --- File Upload to public/uploads ---
     const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    const storagePrefix = process.env.FIREBASE_STORAGE_PREFIX || "media";
+    const storagePrefix = process.env.UPLOADS_PREFIX || "media";
 
     // Upload main media file
     const fileExtension = path.extname(file.name);
