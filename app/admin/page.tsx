@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import React, { useState, useEffect } from "react";
 import axios from "axios";
 
@@ -191,7 +190,6 @@ interface AdminAnalyticsResponse {
 type AdminSection = "upload" | "subscriptions" | "analytics" | "delete" | "plans" | "support";
 
 export default function AdminPage() {
-  const router = useRouter();
   const [activeSection, setActiveSection] = useState<AdminSection>("upload");
 
   const [formData, setFormData] = useState<MediaUpload>({
@@ -282,13 +280,16 @@ export default function AdminPage() {
     try {
       // This API route clears the httpOnly cookie on the server.
       await axios.post("/api/logout");
-      // Redirect to the admin login page after successful logout.
-      router.push("/admin-login");
     } catch (error) {
       console.error("An error occurred during logout:", error);
       if (axios.isAxiosError(error) && error.response) {
         console.error("Logout failed:", error.response.data.message || error.response.statusText);
       }
+    } finally {
+      // Use a hard navigation (not router.push) so the browser re-requests with
+      // the cleared cookie and all client state is dropped. A soft navigation can
+      // race the cookie clear and get bounced back into /admin by the middleware.
+      window.location.href = "/login";
     }
   };
 

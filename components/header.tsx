@@ -67,14 +67,14 @@ export function Header({ user }: HeaderProps) {
       await fetch("/api/logout", {
         method: "POST",
       })
-      router.push("/login")
-      // Refresh the page to ensure the user's session is fully cleared from the client.
-      router.refresh()
     } catch (error) {
       console.error("Logout failed", error)
       // Optionally, show an error message to the user
     } finally {
-      setIsLoggingOut(false)
+      // Hard navigation (not router.push) so the browser re-requests with the
+      // cleared cookie and all client state is dropped. A soft navigation can
+      // race the cookie clear and leave the user appearing still logged in.
+      window.location.href = "/login"
     }
   }
 
