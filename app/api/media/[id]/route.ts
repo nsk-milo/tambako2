@@ -1,8 +1,7 @@
 import { getUserDataFromToken } from "@/lib/auth"
 import { Prisma, PrismaClient } from "@/lib/generated/prisma"
 import { NextRequest, NextResponse } from "next/server"
-import { unlink } from "fs/promises";
-import path from "path";
+import { firebaseStorageService } from "@/lib/google-drive";
 
 const prisma = new PrismaClient()
 
@@ -59,10 +58,8 @@ export async function GET(request: NextRequest, context: MediaRouteContext) {
     const videoSources = media.media_location
       ? [
           { quality: "auto", url: media.media_location },
-          { quality: "1080p", url: media.media_location.replace(/\.mp4$/i, "-1080p.mp4") },
-          { quality: "720p", url: media.media_location.replace(/\.mp4$/i, "-720p.mp4") },
-          { quality: "480p", url: media.media_location.replace(/\.mp4$/i, "-480p.mp4") },
-          { quality: "360p", url: media.media_location.replace(/\.mp4$/i, "-360p.mp4") },
+          // Note: Rendition URLs are not stored separately in the database
+          // Each quality would need to be stored as separate media entries or in additional fields
         ]
       : [];
 
@@ -78,7 +75,7 @@ export async function GET(request: NextRequest, context: MediaRouteContext) {
       duration: `${media.duration} min`,
       videoUrl: media.media_location,
       videoSources,
-      hlsUrl: media.media_location?.replace(/\.mp4$/i, ".m3u8"),
+      hlsUrl: null, // HLS URL not stored separately
     }
 
     return NextResponse.json(formattedMedia)
@@ -132,31 +129,22 @@ export async function DELETE(req: NextRequest, context: MediaRouteContext) {
       );
     }
 
-    // 2. Delete physical files from the server
+    // 2. Delete files from Firebase Storage
     const { media_location, thumbnail_location } = mediaItem;
 
     if (media_location) {
-      const safeMediaLocation = media_location.replace(/^\/+/, "");
-      const mediaPath = path.join(process.cwd(), "public", safeMediaLocation);
       try {
-        await unlink(mediaPath);
+        await firebaseStorageService.deleteFile(media_location);
       } catch (fileError) {
-        // Log error but don't block DB deletion if file is already gone
-        if ((fileError as NodeJS.ErrnoException).code !== "ENOENT") {
-          console.error(`Failed to delete media file: ${mediaPath}`, fileError);
-        }
+        console.error("Failed to delete media file from Firebase Storage:", fileError);
       }
     }
 
     if (thumbnail_location) {
-      const safeThumbnailLocation = thumbnail_location.replace(/^\/+/, "");
-      const thumbnailPath = path.join(process.cwd(), "public", safeThumbnailLocation);
       try {
-        await unlink(thumbnailPath);
+        await firebaseStorageService.deleteFile(thumbnail_location);
       } catch (fileError) {
-        if ((fileError as NodeJS.ErrnoException).code !== "ENOENT") {
-          console.error(`Failed to delete thumbnail file: ${thumbnailPath}`, fileError);
-        }
+        console.error("Failed to delete thumbnail file from Firebase Storage:", fileError);
       }
     }
 
@@ -174,5 +162,4 @@ export async function DELETE(req: NextRequest, context: MediaRouteContext) {
     await prisma.$disconnect();
   }
 }
-
 

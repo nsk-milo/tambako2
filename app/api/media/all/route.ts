@@ -1,26 +1,10 @@
 import { NextResponse } from "next/server";
 import { PrismaClient, Prisma } from "@/lib/generated/prisma";
 import { getUserDataFromToken } from "@/lib/auth";
-import { mkdir } from "fs/promises";
-import { createWriteStream } from "fs";
+import { firebaseStorageService } from "@/lib/google-drive";
 import path from "path";
-import { pipeline } from "stream/promises";
 
 const prisma = new PrismaClient();
-
-const UPLOAD_DIR = path.join(process.cwd(), "public/uploads");
-
-// Helper function to create the necessary upload directories if they don't exist.
-async function ensureUploadsDirExists() {
-  try {
-    await mkdir(path.join(UPLOAD_DIR, "media"), { recursive: true });
-    await mkdir(path.join(UPLOAD_DIR, "thumbnails"), { recursive: true });
-  } catch (error) {
-    console.error("Error creating upload directories:", error);
-    // It's better to throw an error to stop the execution if we can't save files.
-    throw new Error("Could not create upload directories.");
-  }
-}
 
 /**
  * IMPORTANT: Disable the default Next.js body parser.
@@ -60,63 +44,79 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
-    await ensureUploadsDirExists();
-
-    // --- File Handling using Streams (Memory Efficient) ---
-    // Instead of loading the entire file into memory with arrayBuffer(),
-    // we stream it directly to the disk. This is crucial for large files.
-
+    // --- File Upload to Firebase Storage ---
     const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    
-    // Process main media file
+    const storagePrefix = process.env.FIREBASE_STORAGE_PREFIX || "media";
+
+    // Upload main media file
     const fileExtension = path.extname(file.name);
     const fileName = `${uniqueSuffix}${fileExtension}`;
-    const fileSystemPath = path.join("media", fileName);
-    const fileDiskPath = path.join(UPLOAD_DIR, fileSystemPath);
-    // @ts-expect-error - file.stream() is valid in Node.js environments
-    await pipeline(file.stream(), createWriteStream(fileDiskPath));
+    const mediaUrl = await firebaseStorageService.uploadFile(
+      file,
+      fileName,
+      file.type || 'application/octet-stream',
+      storagePrefix
+    );
 
-    const saveOptionalRendition = async (rendition: File | null, suffix: string) => {
+    // Upload optional renditions
+    const uploadedRenditions: { [key: string]: string } = {};
+
+    const uploadOptionalRendition = async (rendition: File | null, suffix: string) => {
       if (!rendition) return;
       const renditionExtension = path.extname(rendition.name) || fileExtension;
       const renditionName = `${uniqueSuffix}-${suffix}${renditionExtension}`;
-      const renditionSystemPath = path.join("media", renditionName);
-      const renditionDiskPath = path.join(UPLOAD_DIR, renditionSystemPath);
-      // @ts-expect-error - file.stream() is valid in Node.js environments
-      await pipeline(rendition.stream(), createWriteStream(renditionDiskPath));
+      const url = await firebaseStorageService.uploadFile(
+        rendition,
+        renditionName,
+        rendition.type || 'application/octet-stream',
+        storagePrefix
+      );
+      uploadedRenditions[suffix] = url;
     };
 
-    await saveOptionalRendition(file1080, "1080p");
-    await saveOptionalRendition(file720, "720p");
-    await saveOptionalRendition(file480, "480p");
-    await saveOptionalRendition(file360, "360p");
+    await Promise.all([
+      uploadOptionalRendition(file1080, "1080p"),
+      uploadOptionalRendition(file720, "720p"),
+      uploadOptionalRendition(file480, "480p"),
+      uploadOptionalRendition(file360, "360p"),
+    ]);
 
+    // Upload HLS files if provided
+    let hlsPlaylistUrl: string | undefined;
     if (hlsPlaylist) {
       const playlistExtension = path.extname(hlsPlaylist.name) || ".m3u8";
       const playlistName = `${uniqueSuffix}${playlistExtension}`;
-      const playlistSystemPath = path.join("media", playlistName);
-      const playlistDiskPath = path.join(UPLOAD_DIR, playlistSystemPath);
-      // @ts-expect-error - file.stream() is valid in Node.js environments
-      await pipeline(hlsPlaylist.stream(), createWriteStream(playlistDiskPath));
+      hlsPlaylistUrl = await firebaseStorageService.uploadFile(
+        hlsPlaylist,
+        playlistName,
+        hlsPlaylist.type || 'application/vnd.apple.mpegurl',
+        `${storagePrefix}/hls`
+      );
     }
 
+    const hlsSegmentUrls: string[] = [];
     if (hlsSegments.length) {
       for (const segment of hlsSegments) {
         const segmentName = segment.name || `${uniqueSuffix}-${Math.random().toString(36).slice(2)}.ts`;
-        const segmentSystemPath = path.join("media", segmentName);
-        const segmentDiskPath = path.join(UPLOAD_DIR, segmentSystemPath);
-        // @ts-expect-error - file.stream() is valid in Node.js environments
-        await pipeline(segment.stream(), createWriteStream(segmentDiskPath));
+        const url = await firebaseStorageService.uploadFile(
+          segment,
+          segmentName,
+          segment.type || 'video/MP2T',
+          `${storagePrefix}/hls`
+        );
+        hlsSegmentUrls.push(url);
       }
     }
 
-    // Process thumbnail file
+    // Upload thumbnail
     const thumbnailExtension = path.extname(thumbnail.name);
     const thumbnailName = `${uniqueSuffix}${thumbnailExtension}`;
-    const thumbnailSystemPath = path.join("thumbnails", thumbnailName);
-    const thumbnailDiskPath = path.join(UPLOAD_DIR, thumbnailSystemPath);
-    // @ts-expect-error - thumbnail.stream() is valid in Node.js environments
-    await pipeline(thumbnail.stream(), createWriteStream(thumbnailDiskPath));
+    const thumbnailUrl = await firebaseStorageService.uploadFile(
+      thumbnail,
+      thumbnailName,
+      thumbnail.type || 'image/jpeg',
+      `${storagePrefix}/thumbnails`
+    );
 
     // --- Database Operations ---
     const categoryRecord = await prisma.categories.findFirst({
@@ -143,8 +143,8 @@ export async function POST(request: Request) {
         category_id: categoryRecord.category_id,
         duration: parseInt(duration.split(" ")[0]) || 0,
         rating: rating ? parseFloat(rating) : null,
-        media_location: `/uploads/${fileSystemPath}`,
-        thumbnail_location: `/uploads/${thumbnailSystemPath}`,
+        media_location: mediaUrl,
+        thumbnail_location: thumbnailUrl,
         provider_id: providerId ?? undefined,
       },
     });

@@ -20,6 +20,7 @@
     "bcrypt": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "firebase-admin": "^13.9.0",
     "framer-motion": "^12.23.12",
     "geist": "^1.4.2",
     "hls.js": "^1.6.15",
