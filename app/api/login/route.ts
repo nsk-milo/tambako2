@@ -71,9 +71,11 @@ export async function POST(req: Request) {
       maxAge: 60 * 60,  // 1 hour
     })
 
-    // Return a success response
+    // Return a success response, including the role so the client can
+    // route the user to the correct landing page (the JWT itself is
+    // httpOnly and cannot be read by client-side code).
     return NextResponse.json(
-      { message: "Login successful" },
+      { message: "Login successful", role: user.role?.name ?? null },
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },

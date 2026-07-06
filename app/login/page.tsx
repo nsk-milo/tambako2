@@ -28,13 +28,20 @@ export default function LoginPage() {
     const cleaned = phone.replace(/[+\s]/g, "");
 
     try {
-      await axios.post("/api/login", {
+      const response = await axios.post("/api/login", {
         phoneNumber: cleaned,
         password: password,
       });
 
-      // Login successful
-      router.push("/home"); // Redirect to home page on success
+      // Login successful — route based on the user's role.
+      const role = response.data?.role;
+      if (role === "ADMIN") {
+        router.push("/admin");
+      } else if (role === "ContentCreator") {
+        router.push("/content-provider");
+      } else {
+        router.push("/home");
+      }
     } catch (err) {
       if (axios.isAxiosError(err) && err.response) {
         // The request was made and the server responded with a status code
