@@ -51,9 +51,21 @@ export async function middleware(request: NextRequest) {
       }
 
       const isAdmin = decoded.role === "ADMIN";
+      // Match the admin section only (not the public "/admin-login" page).
+      const isAdminPath = path === "/admin" || path.startsWith("/admin/");
 
-      // Role-based access control for admin routes
-      if (path.startsWith("/admin") && !isAdmin) {
+      // Admins are confined to the admin area: any other page sends them to /admin.
+      if (isAdmin) {
+        if (!isAdminPath) {
+          return NextResponse.redirect(new URL("/admin", request.url));
+        }
+        return NextResponse.next();
+      }
+
+      // From here down the user is authenticated but NOT an admin.
+
+      // Non-admins cannot access admin routes.
+      if (isAdminPath) {
         console.warn(`Access denied for user ${decoded.userId} to admin path: ${path}`);
         return NextResponse.redirect(new URL("/", request.url));
       }
