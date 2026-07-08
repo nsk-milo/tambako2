@@ -1,5 +1,10 @@
+"use client"
+
 import Link from "next/link"
 import { PlayCircle } from "lucide-react"
+import { useState } from "react"
+
+const PLACEHOLDER = "/placeholder.svg"
 
 interface MediaCardProps {
   id: string
@@ -10,6 +15,10 @@ interface MediaCardProps {
 }
 
 export function MediaCard({ id, title, image, year, rating }: MediaCardProps) {
+  // Fall back to the placeholder when the thumbnail is missing or fails to load
+  // (e.g. a stale/dead URL), so a broken-image icon is never shown.
+  const [src, setSrc] = useState(image || PLACEHOLDER)
+
   return (
     <Link
       href={`/watch/${id}`}
@@ -17,8 +26,11 @@ export function MediaCard({ id, title, image, year, rating }: MediaCardProps) {
     >
       <div className="w-full h-full rounded-lg overflow-hidden">
         <img
-          src={image || "/placeholder.png"}
+          src={src}
           alt={title}
+          onError={() => {
+            if (src !== PLACEHOLDER) setSrc(PLACEHOLDER)
+          }}
           className="w-full h-full object-cover transition-transform duration-300 ease-in-out group-hover:scale-105"
         />
       </div>

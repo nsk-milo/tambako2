@@ -33,13 +33,24 @@ export async function POST(request: Request) {
 
     const password_hash = await bcrypt.hash(password, 10);
 
+    // Always default new sign-ups to the USER role. We look it up by name rather
+    // than hard-coding an id, since role ids are not guaranteed to be stable.
+    const userRole = await prisma.role.findFirst({ where: { name: "USER" } });
+
+    if (!userRole) {
+      return NextResponse.json(
+        { error: "Default user role is not configured." },
+        { status: 500 }
+      );
+    }
+
     const newUser = await prisma.users.create({
       data: {
         name,
         email,
         phone_number,
         password_hash,
-        roleId: 3 // Default role ID for regular users
+        roleId: userRole.id,
       },
     });
 
