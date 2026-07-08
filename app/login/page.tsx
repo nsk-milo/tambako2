@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { AlertCircle, Eye, EyeOff, Phone, Lock } from "lucide-react";
 import axios from "axios";
+import { setToken } from "@/lib/http";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -32,6 +33,11 @@ export default function LoginPage() {
         phoneNumber: cleaned,
         password: password,
       });
+
+      // Store the JWT so it can be sent as a Bearer header on future requests.
+      if (response.data?.token) {
+        setToken(response.data.token);
+      }
 
       // Login successful — route based on the user's role.
       const role = response.data?.role;

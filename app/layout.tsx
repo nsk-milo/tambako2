@@ -5,6 +5,7 @@ import { GeistMono } from "geist/font/mono"
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { Toaster } from "@/components/toaster"
+import { AuthGuard } from "@/components/auth-guard"
 
 export const metadata: Metadata = {
   title: "Tamboko - Stream Everything",
@@ -30,6 +31,7 @@ html {
       </head>
       <body className="min-h-screen bg-gradient-to-br from-white via-gray-100 to-white dark:from-black dark:via-gray-900 dark:to-black">
         <ThemeProvider attribute="class" forcedTheme="dark" disableTransitionOnChange>
+          <AuthGuard />
           {children}
           <Toaster />
         </ThemeProvider>

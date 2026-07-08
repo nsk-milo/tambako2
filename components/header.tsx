@@ -10,6 +10,8 @@ import { Logo } from "@/components/logo"
 import type { UserPayload } from "@/lib/auth"
 import { motion, AnimatePresence } from "framer-motion"
 import { SearchBar } from "./search-bar";
+import { useCurrentUser } from "@/hooks/use-current-user";
+import { clearToken } from "@/lib/http";
 
 const baseNavigation = [
   { name: "Movies", href: "/movies" },
@@ -20,12 +22,16 @@ const baseNavigation = [
 ]
 
 interface HeaderProps {
-  user: UserPayload | null
+  // Optional: callers may pass a user, but the header resolves it from the
+  // stored JWT itself so server components don't need to compute it.
+  user?: UserPayload | null
 }
 
-export function Header({ user }: HeaderProps) {
+export function Header({ user: userProp }: HeaderProps) {
   const pathname = usePathname()
   const router = useRouter()
+  const currentUser = useCurrentUser()
+  const user = userProp ?? currentUser
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const [hoveredPath, setHoveredPath] = useState<string | null>(null)
@@ -61,21 +67,12 @@ export function Header({ user }: HeaderProps) {
     }
   }, [isMenuOpen])
 
-  const handleLogout = async () => {
+  const handleLogout = () => {
     setIsLoggingOut(true)
-    try {
-      await fetch("/api/logout", {
-        method: "POST",
-      })
-    } catch (error) {
-      console.error("Logout failed", error)
-      // Optionally, show an error message to the user
-    } finally {
-      // Hard navigation (not router.push) so the browser re-requests with the
-      // cleared cookie and all client state is dropped. A soft navigation can
-      // race the cookie clear and leave the user appearing still logged in.
-      window.location.href = "/login"
-    }
+    // Cookie-free logout: drop the stored JWT and hard-navigate so all client
+    // state is reset and the route guard re-evaluates as logged out.
+    clearToken()
+    window.location.href = "/login"
   }
 
   const handleSearchSubmit = (e: React.FormEvent<HTMLFormElement>) => {

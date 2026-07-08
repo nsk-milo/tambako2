@@ -5,6 +5,7 @@ import { Heart } from 'lucide-react';
 // Note: This example uses the toast from shadcn/ui.
 // You can replace this with your own notification system.
 import { useToast } from '@/components/ui/use-toast';
+import { authFetch } from '@/lib/http';
 
 interface FavoriteButtonProps {
   mediaId: string;
@@ -20,7 +21,7 @@ const FavoriteButton: React.FC<FavoriteButtonProps> = ({ mediaId }) => {
     if (!mediaId) return;
     setIsLoading(true);
     try {
-      const response = await fetch(`/api/favourites/${mediaId}`);
+      const response = await authFetch(`/api/favourites/${mediaId}`);
       // A 401 from the API is handled by getUserDataFromToken, which results
       // in a { isFavorite: false } response, so we don't need special error handling here.
       const data = await response.json();
@@ -48,7 +49,7 @@ const FavoriteButton: React.FC<FavoriteButtonProps> = ({ mediaId }) => {
     setIsFavorite(!originalIsFavorite);
 
     try {
-      const response = await fetch('/api/favourites', {
+      const response = await authFetch('/api/favourites', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mediaId }),

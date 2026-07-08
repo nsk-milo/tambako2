@@ -1,6 +1,6 @@
 import { MediaSection } from "@/components/media-section"
 import { Header } from "@/components/header"
-import { getUserDataFromToken } from "@/lib/auth"
+import { WelcomeGreeting } from "@/components/welcome-greeting"
 import { getAllMediaGrouped } from "@/lib/media"
 import Link from "next/link"
 
@@ -20,12 +20,11 @@ async function getMedia() {
 }
 
 export default async function HomePage() {
-  const user = await getUserDataFromToken()
   const { movies, series, music } = await getMedia()
 
   return (
     <>
-      <Header user={user} />
+      <Header />
       <main className="pt-24 pb-8">
         {/* Hero Banner */}
         <section className="relative h-[400px] flex items-center justify-center mb-12 -mt-24">
@@ -36,9 +35,7 @@ export default async function HomePage() {
           />
           <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-black opacity-80"></div>
           <div className="relative z-10 text-center">
-            <h1 className="text-5xl md:text-6xl font-extrabold mb-4 drop-shadow-lg">
-              Welcome back, {user?.username || "Guest"}
-            </h1>
+            <WelcomeGreeting />
             <p className="text-xl md:text-2xl mb-6 text-gray-300 max-w-2xl mx-auto">
               Discover and stream your favorite movies, series, and music all in one place.
             </p>

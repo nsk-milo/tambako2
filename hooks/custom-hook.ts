@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { UserPayload } from "@/lib/auth";
+import { getClientUser, authFetch } from "@/lib/http";
 
 // Define a generic interface for the hook's return value
 interface UsePageDataResult<T> {
@@ -29,13 +30,10 @@ export function usePageData<T = any>(
       setLoading(true);
       setError(null);
       try {
-        const [userResponse, mediaResponse] = await Promise.all([
-          fetch("/api/auth/me"),
-          fetch(mediaApiEndpoint),
-        ]);
+        // The user comes from the locally-stored JWT; media endpoints are public.
+        setUser(getClientUser());
 
-        if (userResponse.ok) setUser((await userResponse.json()).user);
-
+        const mediaResponse = await authFetch(mediaApiEndpoint);
         if (mediaResponse.ok) {
           const mediaData = await mediaResponse.json();
           setData(mediaKey ? mediaData[mediaKey] : mediaData);

@@ -2,7 +2,6 @@ import { PrismaClient } from "@/lib/generated/prisma";
 import bcrypt from "bcrypt";
 import { NextResponse } from "next/server";
 import { sign } from "jsonwebtoken";
-import { cookies } from "next/headers";
 
 const prisma = new PrismaClient();
 
@@ -55,27 +54,14 @@ export async function POST(req: Request) {
 
    
 
-    console.log("JWT Secret:", jwtSecret); // Log the JWT secret for debugging purposes
     const token = sign({ userId: user.user_id.toString(), phoneNumber: user.phone_number,username: user.name,role: user.role?.name }, jwtSecret, {
       expiresIn: '1h', // Token expires in 1 hour
     });
 
-    // Set the token as an HTTP-only cookie
-    (await
-      // Set the token as an HTTP-only cookie
-      cookies()).set({
-      name: 'authToken',
-      value: token,
-      httpOnly: true,
-      path: '/', // The cookie is valid for the entire domain
-      maxAge: 60 * 60,  // 1 hour
-    })
-
-    // Return a success response, including the role so the client can
-    // route the user to the correct landing page (the JWT itself is
-    // httpOnly and cannot be read by client-side code).
+    // Return the token (and role) in the response body. The client stores it in
+    // localStorage and sends it as an `Authorization: Bearer` header on requests.
     return NextResponse.json(
-      { message: "Login successful", role: user.role?.name ?? null },
+      { message: "Login successful", role: user.role?.name ?? null, token },
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },

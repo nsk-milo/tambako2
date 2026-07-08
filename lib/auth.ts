@@ -1,4 +1,4 @@
-import { cookies } from "next/headers"
+import { headers } from "next/headers"
 import { verify } from "jsonwebtoken"
 
 // This interface should match the payload you create during login
@@ -13,8 +13,14 @@ export interface UserPayload {
 
 export const getUserDataFromToken = async (): Promise<UserPayload | null> => {
   try {
-    const cookieStore = cookies()
-    const token = (await cookieStore).get("authToken")?.value
+    // Session management is cookie-free: the JWT is sent as an
+    // `Authorization: Bearer <token>` header from the client.
+    const headerStore = await headers()
+    const authHeader =
+      headerStore.get("authorization") ?? headerStore.get("Authorization")
+    const token = authHeader?.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length)
+      : null
 
     if (!token) {
       // No token found, user is not logged in

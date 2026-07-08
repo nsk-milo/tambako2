@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import axios from "axios";
+import { clearToken } from "@/lib/http";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -276,21 +277,10 @@ export default function AdminPage() {
     }
   };
 
-  const handleLogout = async () => {
-    try {
-      // This API route clears the httpOnly cookie on the server.
-      await axios.post("/api/logout");
-    } catch (error) {
-      console.error("An error occurred during logout:", error);
-      if (axios.isAxiosError(error) && error.response) {
-        console.error("Logout failed:", error.response.data.message || error.response.statusText);
-      }
-    } finally {
-      // Use a hard navigation (not router.push) so the browser re-requests with
-      // the cleared cookie and all client state is dropped. A soft navigation can
-      // race the cookie clear and get bounced back into /admin by the middleware.
-      window.location.href = "/login";
-    }
+  const handleLogout = () => {
+    // Cookie-free logout: drop the stored JWT and hard-navigate to login.
+    clearToken();
+    window.location.href = "/login";
   };
 
   useEffect(() => {

@@ -1,7 +1,11 @@
+"use client";
+
 import { Header } from "@/components/header";
-import React from "react";
+import { useEffect, useState } from "react";
+import axios from "axios";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { getUserDataFromToken } from "@/lib/auth";
+import { getClientUser } from "@/lib/http";
+import type { UserPayload } from "@/lib/auth";
 import ContentProviderUploadClient from "@/app/content-provider/ContentProviderUploadClient";
 import ContentProviderContentListClient from "@/app/content-provider/ContentProviderContentListClient";
 import ContentProviderWithdrawalClient from "@/app/content-provider/ContentProviderWithdrawalClient";
@@ -29,14 +33,62 @@ type ProviderAnalyticsResponse = {
   error?: string;
 };
 
-export default async function ContentProvider() {
-  const user = await getUserDataFromToken()
+export default function ContentProvider() {
+  const [user, setUser] = useState<UserPayload | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [contentItems, setContentItems] = useState<ContentItem[]>([]);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
+  const [noContentMessage, setNoContentMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const currentUser = getClientUser();
+    setUser(currentUser);
+    setAuthChecked(true);
+
+    if (!currentUser || currentUser.role !== "ContentCreator") return;
+
+    // Fetch this provider's analytics (Bearer token attached by the axios interceptor).
+    const fetchAnalytics = async () => {
+      try {
+        const { data } = await axios.get<ProviderAnalyticsResponse>(
+          `/api/analytics/provider/${currentUser.userId}`
+        );
+        if (data.error) {
+          setAnalyticsError(data.error);
+        } else {
+          const items = data.analytics ?? [];
+          setContentItems(items);
+          if (data.message && items.length === 0) setNoContentMessage(data.message);
+        }
+      } catch (error) {
+        setAnalyticsError(
+          error instanceof Error ? error.message : "Failed to load analytics."
+        );
+      }
+    };
+
+    fetchAnalytics();
+  }, []);
+
+  // Avoid flashing "Access Denied" before the token has been read.
+  if (!authChecked) {
+    return (
+      <>
+        <Header />
+        <main className="pt-24 pb-8">
+          <div className="container mx-auto px-4 text-center text-muted-foreground">
+            Loading...
+          </div>
+        </main>
+      </>
+    );
+  }
 
   // Check if user is logged in and has ContentCreator role
   if (!user || user.role !== "ContentCreator") {
     return (
       <>
-        <Header user={user} />
+        <Header />
         <main className="pt-24 pb-8">
           <div className="container mx-auto px-4">
             <Card className="border-red-200 dark:border-red-900">
@@ -54,32 +106,6 @@ export default async function ContentProvider() {
     );
   }
 
-  let contentItems: ContentItem[] = [];
-  let analyticsError: string | null = null;
-  let noContentMessage: string | null = null;
-
-  try {
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? "";
-    const url = baseUrl
-      ? `${baseUrl}/api/analytics/provider/${user.userId}`
-      : `http://localhost:3000/api/analytics/provider/${user.userId}`;
-    const response = await fetch(url, {
-      cache: "no-store",
-    });
-    const data: ProviderAnalyticsResponse = await response.json();
-
-    if (!response.ok || data.error) {
-      analyticsError = data.error || "Failed to load analytics.";
-    } else {
-      contentItems = data.analytics ?? [];
-      if (data.message && contentItems.length === 0) {
-        noContentMessage = data.message;
-      }
-    }
-  } catch (error) {
-    analyticsError = error instanceof Error ? error.message : "Failed to load analytics.";
-  }
-
   // Calculate monthly earnings summary
   const totalMonthlyRevenue = contentItems.reduce(
     (sum, item) => sum + (item.monthlyEarnings ?? item.revenueEarned),
@@ -91,7 +117,7 @@ export default async function ContentProvider() {
 
   return (
     <>
-      <Header user={user} />
+      <Header />
       <main className="pt-24 pb-12">
         <div className="container mx-auto px-4">
           {/* Header Section */}
@@ -174,4 +200,3 @@ export default async function ContentProvider() {
     </>
   );
 }
-
