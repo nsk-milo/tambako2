@@ -1,21 +1,18 @@
 import { MediaSection } from "@/components/media-section"
 import { Header } from "@/components/header"
 import { getUserDataFromToken } from "@/lib/auth"
+import { getAllMediaGrouped } from "@/lib/media"
 import Link from "next/link"
+
+// This page reads the auth cookie and always needs fresh media, so render it
+// per-request rather than attempting static generation.
+export const dynamic = "force-dynamic"
 
 async function getMedia() {
   try {
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
-    console.log("baseUrl:", baseUrl);
-    const response = await fetch(`${baseUrl}/api/media/all`, {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      cache: "no-store", // ensures fresh data
-    });
-
-    return response.json();
+    // Query the database directly instead of fetching the app's own API route
+    // over HTTP (which is fragile and triggers Next's dynamic-server error).
+    return await getAllMediaGrouped();
   } catch (error) {
     console.error("Failed to fetch media:", error);
     return { movies: [], series: [], music: [] };
