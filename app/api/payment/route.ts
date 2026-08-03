@@ -1,353 +1,227 @@
 import { Prisma, PrismaClient } from "@/lib/generated/prisma";
 import { NextResponse } from "next/server";
 
-const PAYMENT_API_URL = process.env.PAWAPAY_URL as string;
-const PAYMENT_STATUS_URL = process.env.PAWAPAY_STATUS_URL as string | undefined;
-const PAYMENT_POLL_ATTEMPTS = 6;
-const PAYMENT_POLL_INTERVAL_MS = 5000;
-
 const prisma = new PrismaClient();
+const LENCO_API_BASE_URL = process.env.LENCO_API_BASE_URL || "https://api.lenco.co";
+const LENCO_PUBLIC_KEY = process.env.LENCO_PUBLIC_KEY;
+const LENCO_SECRET_KEY = process.env.LENCO_SECRET_KEY;
+const LENCO_WIDGET_URL = process.env.NEXT_PUBLIC_LENCO_WIDGET_URL || process.env.LENCO_WIDGET_URL || "https://pay.sandbox.lenco.co/js/v1/inline.js";
 
-const FAILED_PAYMENT_STATUSES = ["FAILED", "REJECTED", "ERROR", "CANCELLED", "EXPIRED"];
-const SUCCESS_PAYMENT_STATUSES = ["ACCEPTED", "COMPLETED", "SUCCESS", "SUCCESSFUL"];
+const buildPhoneCandidates = (phoneNumber: string) => {
+  const cleanPhone = phoneNumber.replace(/\s+/g, "");
+  const candidates = new Set<string>([cleanPhone]);
+  const digitsOnly = cleanPhone.replace(/\D/g, "");
 
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  if (digitsOnly) {
+    candidates.add(digitsOnly);
+    if (digitsOnly.startsWith("0") && digitsOnly.length >= 10) {
+      candidates.add(`26${digitsOnly}`);
+    }
+    if (digitsOnly.startsWith("260") && digitsOnly.length > 3) {
+      candidates.add(`0${digitsOnly.slice(3)}`);
+    }
+  }
 
-const getProviderPayload = (data: unknown) => (Array.isArray(data) ? data[0] : data);
+  return Array.from(candidates);
+};
 
-const getPaymentStatus = (payload: unknown) =>
-  payload && typeof payload === "object" && "status" in payload
-    ? String((payload as { status?: unknown }).status ?? "").trim().toUpperCase()
-    : "";
+const createSubscriptionForUser = async ({
+  userId,
+  amount,
+  planId,
+}: {
+  userId: bigint;
+  amount: number;
+  planId?: number;
+}) => {
+  const plan = planId
+    ? await prisma.subscriptions.findUnique({ where: { subscription_id: planId } })
+    : await prisma.subscriptions.findFirst({ where: { cost: new Prisma.Decimal(amount) } });
 
-const getDepositId = (payload: unknown) =>
-  payload && typeof payload === "object" && "depositId" in payload
-    ? String((payload as { depositId?: unknown }).depositId ?? "")
-    : "";
+  if (!plan) {
+    throw new Error(`Subscription plan not found for amount ${amount}`);
+  }
+
+  const activeSubscription = await prisma.user_subscriptions.findFirst({
+    where: {
+      user_id: userId,
+      is_active: true,
+    },
+  });
+
+  let startDate = new Date();
+  if (activeSubscription && activeSubscription.end_date > new Date()) {
+    startDate = activeSubscription.end_date;
+  }
+
+  const endDate = new Date(startDate);
+  switch (plan.type.toLowerCase()) {
+    case "daily":
+    case "dialy":
+      endDate.setDate(endDate.getDate() + 1);
+      break;
+    case "weekly":
+      endDate.setDate(endDate.getDate() + 7);
+      break;
+    case "monthly":
+      endDate.setMonth(endDate.getMonth() + 1);
+      break;
+    default:
+      endDate.setDate(endDate.getDate() + 1);
+      break;
+  }
+
+  return prisma.$transaction(async (tx) => {
+    await tx.user_subscriptions.updateMany({
+      where: { user_id: userId, is_active: true },
+      data: { is_active: false },
+    });
+
+    const userSubscription = await tx.user_subscriptions.create({
+      data: {
+        user_id: userId,
+        subscription_id: plan.subscription_id,
+        start_date: startDate,
+        end_date: endDate,
+        is_active: true,
+      },
+    });
+
+    await tx.transactions.create({
+      data: {
+        user_id: userId,
+        user_subscription_id: userSubscription.user_subscription_id,
+        amount: new Prisma.Decimal(amount),
+      },
+    });
+
+    return { userSubscription, plan };
+  });
+};
 
 export async function POST(req: Request) {
   try {
-    // Parse and validate request body
-    const { phoneNumber, amount, provider } = (await req.json()) as {
+    const body = (await req.json()) as {
+      action?: "initiate" | "verify";
       phoneNumber?: string;
       amount?: string | number;
-      provider?: string;
+      email?: string;
+      customerName?: string;
+      channels?: string[];
+      reference?: string;
+      planId?: number;
     };
 
-    if (!phoneNumber || !amount || !provider) {
-      return NextResponse.json(
-        { message: "Missing required fields" },
-        { status: 400 }
-      );
+    const action = body.action || "initiate";
+    const numericAmount = typeof body.amount === "string" ? Number(body.amount) : body.amount;
+    const safeAmount = typeof numericAmount === "number" ? numericAmount : NaN;
+
+    if (!Number.isFinite(safeAmount) || safeAmount <= 0) {
+      return NextResponse.json({ message: "Invalid payment amount" }, { status: 400 });
     }
 
-    const normalizedProviderKey = provider.toUpperCase() as keyof typeof Provider;
-    const providerValue = Provider[normalizedProviderKey];
-    if (!providerValue) {
-      return NextResponse.json(
-        { message: "Invalid provider selected" },
-        { status: 400 }
-      );
+    if (action === "initiate") {
+      const email = body.email?.trim().toLowerCase();
+      if (!email) {
+        return NextResponse.json({ message: "Email is required" }, { status: 400 });
+      }
+
+      return NextResponse.json({
+        message: "Payment widget ready",
+        reference: `sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        publicKey: LENCO_PUBLIC_KEY || "",
+        amount: safeAmount,
+        currency: "ZMW",
+        channels: body.channels?.length ? body.channels : ["mobile-money"],
+        widgetUrl: LENCO_WIDGET_URL,
+      });
     }
 
-    const numericAmount = typeof amount === "string" ? Number(amount) : amount;
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
-      return NextResponse.json(
-        { message: "Invalid payment amount" },
-        { status: 400 }
-      );
+    const reference = body.reference?.trim();
+    if (!reference) {
+      return NextResponse.json({ message: "Missing payment reference" }, { status: 400 });
     }
 
-    const cleanPhone = phoneNumber.replace(/\s+/g, "");
-
-    const deposit: Deposit = {
-      currency: "ZMW",
-      depositId: crypto.randomUUID(),
-      amount: numericAmount.toString(),
-      payer: {
-        type: "MMO",
-        accountDetails: {
-          phoneNumber: cleanPhone,
-          provider: providerValue,
-        },
-      },
-    };
-
-    console.log(JSON.stringify(deposit, null, 2));
-
-    // Call external payment API
-    const response = await fetch(PAYMENT_API_URL, {
-      method: "POST",
+    const verificationResponse = await fetch(`${LENCO_API_BASE_URL}/access/v2/collections/status/${encodeURIComponent(reference)}`, {
+      method: "GET",
       headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.PAYMENT_TOKEN}`,
+        Authorization: `Bearer ${LENCO_SECRET_KEY}`,
       },
-      body: JSON.stringify(deposit),
     });
 
-    let data: unknown = null;
-    try {
-      data = await response.json();
-    } catch {
-      data = null;
-    }
-
-    let paymentResponse = getProviderPayload(data);
-    let normalizedPaymentStatus = getPaymentStatus(paymentResponse);
-    const depositId = getDepositId(paymentResponse);
-
-    if (!response.ok) {
+    if (!verificationResponse.ok) {
+      const errorData = await verificationResponse.text();
+      console.error("Lenco verification failed:", errorData);
       return NextResponse.json(
-        {
-          message:
-            paymentResponse &&
-            typeof paymentResponse === "object" &&
-            "message" in paymentResponse &&
-            typeof (paymentResponse as { message?: unknown }).message === "string"
-              ? ((paymentResponse as { message?: string }).message as string)
-              : "Payment processing failed",
-        },
-        { status: response.status }
+        { message: "We could not verify the payment with Lenco yet." },
+        { status: verificationResponse.status }
       );
     }
 
-    if (FAILED_PAYMENT_STATUSES.includes(normalizedPaymentStatus)) {
+    const verificationPayload = (await verificationResponse.json()) as {
+      status?: boolean;
+      data?: {
+        status?: string;
+        settlementStatus?: string;
+        reference?: string;
+      };
+    };
+
+    const paymentStatus = String(verificationPayload.data?.status || "").trim().toLowerCase();
+    const settlementStatus = String(verificationPayload.data?.settlementStatus || "").trim().toLowerCase();
+    const isSuccessful = paymentStatus === "successful" || paymentStatus === "completed" || paymentStatus === "paid" || settlementStatus === "settled";
+
+    if (!isSuccessful) {
       return NextResponse.json(
         {
-          message: "Payment was not approved.",
-          paymentStatus: normalizedPaymentStatus,
-          providerResponse: paymentResponse,
-        },
-        { status: 402 }
-      );
-    }
-
-    if (!SUCCESS_PAYMENT_STATUSES.includes(normalizedPaymentStatus) && depositId) {
-      for (let i = 0; i < PAYMENT_POLL_ATTEMPTS; i += 1) {
-        await wait(PAYMENT_POLL_INTERVAL_MS);
-        try {
-          const statusUrl = `${PAYMENT_STATUS_URL ?? PAYMENT_API_URL}/${depositId}`;
-          const statusResponse = await fetch(statusUrl, {
-            method: "GET",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${process.env.PAYMENT_TOKEN}`,
-            },
-          });
-
-          if (!statusResponse.ok) continue;
-
-          const statusData: unknown = await statusResponse.json();
-          const statusPayload = getProviderPayload(statusData);
-          const polledStatus = getPaymentStatus(statusPayload);
-
-          if (polledStatus) {
-            normalizedPaymentStatus = polledStatus;
-            paymentResponse = statusPayload;
-          }
-
-          if (SUCCESS_PAYMENT_STATUSES.includes(normalizedPaymentStatus)) break;
-          if (FAILED_PAYMENT_STATUSES.includes(normalizedPaymentStatus)) {
-            return NextResponse.json(
-              {
-                message: "Payment was not approved.",
-                paymentStatus: normalizedPaymentStatus,
-                providerResponse: paymentResponse,
-              },
-              { status: 402 }
-            );
-          }
-        } catch {
-          // continue polling
-        }
-      }
-    }
-
-    if (!SUCCESS_PAYMENT_STATUSES.includes(normalizedPaymentStatus)) {
-      return NextResponse.json(
-        {
-          message: "Payment request submitted. Please approve the prompt on your phone.",
-          paymentStatus: normalizedPaymentStatus,
-          depositId,
-          providerResponse: paymentResponse,
+          message: "Payment is still pending confirmation.",
+          paymentStatus,
+          settlementStatus,
         },
         { status: 202 }
       );
     }
 
-    console.log("Payment API response:", paymentResponse);
-
-    // Find the user by phone number
-    const candidatePhoneNumbers = new Set<string>([cleanPhone]);
-    const digitsOnly = cleanPhone.replace(/\D/g, "");
-    if (digitsOnly) {
-      candidatePhoneNumbers.add(digitsOnly);
-      if (digitsOnly.startsWith("0") && digitsOnly.length >= 10) {
-        candidatePhoneNumbers.add(`26${digitsOnly}`);
-      }
-      if (digitsOnly.startsWith("260") && digitsOnly.length > 3) {
-        candidatePhoneNumbers.add(`0${digitsOnly.slice(3)}`);
-      }
-    }
+    const normalizedEmail = body.email?.trim().toLowerCase();
+    const phoneCandidates = body.phoneNumber ? buildPhoneCandidates(body.phoneNumber) : [];
 
     const user = await prisma.users.findFirst({
       where: {
-        phone_number: { in: Array.from(candidatePhoneNumbers) },
+        OR: [
+          ...(normalizedEmail ? [{ email: normalizedEmail }] : []),
+          ...(phoneCandidates.length ? [{ phone_number: { in: phoneCandidates } }] : []),
+        ],
       },
     });
 
     if (!user) {
-      console.error(
-        `Payment successful but user with phone number ${cleanPhone} not found.`
-      );
-      // We still return success because payment request was accepted by provider.
       return NextResponse.json(
         {
-          message: paymentResponse as PaymentApiResponse,
+          message: "Payment successful but your account could not be linked automatically.",
           subscriptionStatus: "User not found",
         },
         { status: 200 }
       );
     }
 
-    // Find the subscription plan by amount
-    const subscription = await prisma.subscriptions.findFirst({
-      where: {
-        cost: new Prisma.Decimal(numericAmount),
-      },
+    const subscriptionResult = await createSubscriptionForUser({
+      userId: user.user_id,
+      amount: safeAmount,
+      planId: body.planId,
     });
-
-    if (!subscription) {
-      console.error(
-        `Payment successful but subscription with amount ${numericAmount} not found.`
-      );
-      return NextResponse.json(
-        {
-          message: paymentResponse as PaymentApiResponse,
-          subscriptionStatus: "Subscription plan not found",
-        },
-        { status: 200 }
-      );
-    }
-
-    // Check for an existing active subscription to handle renewals
-    const activeSubscription = await prisma.user_subscriptions.findFirst({
-      where: {
-        user_id: user.user_id,
-        is_active: true,
-      },
-    });
-
-    let startDate = new Date();
-    if (activeSubscription) {
-      // If the current subscription is still active, stack the new one on top
-      const now = new Date();
-      if (activeSubscription.end_date > now) {
-        startDate = activeSubscription.end_date;
-      }
-    }
-
-    const endDate = new Date(startDate);
-    switch (subscription.type.toLowerCase()) {
-      case "daily":
-      case "dialy":
-        endDate.setDate(endDate.getDate() + 1);
-        break;
-      case "weekly":
-        endDate.setDate(endDate.getDate() + 7);
-        break;
-      case "monthly":
-        endDate.setMonth(endDate.getMonth() + 1);
-        break;
-      default:
-        console.warn(
-          `Unknown subscription type "${subscription.type}", defaulting to 1 day.`
-        );
-        endDate.setDate(endDate.getDate() + 1);
-        break;
-    }
-
-    // Use a transaction to deactivate the old subscription and create the new one
-    await prisma.$transaction(async (tx) => {
-      // Deactivate any existing active subscription for this user
-      await tx.user_subscriptions.updateMany({
-        where: { user_id: user.user_id, is_active: true },
-        data: { is_active: false },
-      });
-
-      // Create the new user subscription record
-      const user_sub = await tx.user_subscriptions.create({
-        data: {
-          user_id: user.user_id,
-          subscription_id: subscription.subscription_id,
-          start_date: startDate,
-          end_date: endDate,
-          is_active: true,
-        },
-      });
-
-      if (user_sub) {
-        console.log("Created user subscription:", user_sub);
-        // Create the transaction using the same tx client
-        await tx.transactions.create({
-          data: {
-            user_id: user.user_id,
-            user_subscription_id: user_sub.user_subscription_id,
-            amount: new Prisma.Decimal(numericAmount),
-          },
-        });
-      }
-    });
-
-    console.log(
-      "User subscription created successfully for user:",
-      user.user_id
-    );
 
     return NextResponse.json(
       {
-        message: paymentResponse as PaymentApiResponse,
+        message: "Payment successful and subscription activated.",
         subscriptionStatus: "Subscription created",
+        planName: subscriptionResult.plan?.subscription_id ? "Subscription plan" : "Subscription plan",
       },
       { status: 200 }
     );
   } catch (error) {
     console.error("Payment processing error:", error);
-    return NextResponse.json(
-      { message: "failed to make payment" },
-      { status: 500 }
-    );
+    return NextResponse.json({ message: "Unable to process payment right now." }, { status: 500 });
   } finally {
     await prisma.$disconnect();
   }
-}
-
-interface Deposit {
-  depositId: string;
-  amount: string;
-  currency: "ZMW";
-  payer: Payer;
-}
-
-interface Payer {
-  type: "MMO";
-  accountDetails: AccountDetails;
-}
-
-interface AccountDetails {
-  phoneNumber: string;
-  provider: Provider;
-}
-
-enum Provider {
-  MTN = "MTN_MOMO_ZMB",
-  AIRTEL = "AIRTEL_OAPI_ZMB",
-  ZAMTEL = "ZAMTEL_ZMB",
-}
-
-interface PaymentApiResponse {
-  depositId: string;
-  status: string;
-  created: string;
-  nextStep: string;
 }
