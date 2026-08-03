@@ -166,13 +166,11 @@ export default function SubscribePage() {
     return new Promise<void>((resolve, reject) => {
       const existingScript = document.querySelector<HTMLScriptElement>("script[data-lenco-payment]")
       if (existingScript) {
-        existingScript.addEventListener("load", () => resolve(), { once: true })
-        existingScript.addEventListener("error", () => reject(new Error("Unable to load the Lenco payment widget.")), { once: true })
-        return
+        existingScript.remove()
       }
 
       const script = document.createElement("script")
-      script.src = scriptUrl
+      script.src = `${scriptUrl}${scriptUrl.includes("?") ? "&" : "?"}v=${Date.now()}`
       script.async = true
       script.setAttribute("data-lenco-payment", "true")
       script.onload = () => resolve()
@@ -198,14 +196,23 @@ export default function SubscribePage() {
     try {
       await loadLencoScript()
 
-      const { data } = await axios.post("/api/payment", {
-        action: "initiate",
-        amount: Number(selectedPlan.cost),
-        email,
-        phoneNumber,
-        customerName: fullName,
-        channels: [paymentMethod],
-      })
+      const { data } = await axios.post(
+        "/api/payment",
+        {
+          action: "initiate",
+          amount: Number(selectedPlan.cost),
+          email,
+          phoneNumber,
+          customerName: fullName,
+          channels: [paymentMethod],
+        },
+        {
+          headers: {
+            "Cache-Control": "no-cache",
+            Pragma: "no-cache",
+          },
+        }
+      )
 
       if (!data?.publicKey || !data.reference) {
         throw new Error("The payment gateway is not configured correctly.")
@@ -228,15 +235,24 @@ export default function SubscribePage() {
         },
         onSuccess: async (response) => {
           try {
-            const verifyResponse = await axios.post("/api/payment", {
-              action: "verify",
-              reference: response.reference,
-              amount: Number(selectedPlan.cost),
-              email,
-              phoneNumber,
-              customerName: fullName,
-              planId: selectedPlan.subscription_id,
-            })
+            const verifyResponse = await axios.post(
+              "/api/payment",
+              {
+                action: "verify",
+                reference: response.reference,
+                amount: Number(selectedPlan.cost),
+                email,
+                phoneNumber,
+                customerName: fullName,
+                planId: selectedPlan.subscription_id,
+              },
+              {
+                headers: {
+                  "Cache-Control": "no-cache",
+                  Pragma: "no-cache",
+                },
+              }
+            )
 
             setDialogState({
               open: true,

@@ -1,6 +1,9 @@
 import { Prisma, PrismaClient } from "@/lib/generated/prisma";
 import { NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 const prisma = new PrismaClient();
 const LENCO_API_BASE_URL = process.env.LENCO_API_BASE_URL || "https://api.lenco.co";
 const LENCO_PUBLIC_KEY = process.env.LENCO_PUBLIC_KEY;
@@ -126,7 +129,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ message: "Email is required" }, { status: 400 });
       }
 
-      return NextResponse.json({
+      const response = NextResponse.json({
         message: "Payment widget ready",
         reference: `sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         publicKey: LENCO_PUBLIC_KEY || "",
@@ -135,6 +138,11 @@ export async function POST(req: Request) {
         channels: body.channels?.length ? body.channels : ["mobile-money"],
         widgetUrl: LENCO_WIDGET_URL,
       });
+
+      response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      response.headers.set("Pragma", "no-cache");
+      response.headers.set("Expires", "0");
+      return response;
     }
 
     const reference = body.reference?.trim();
@@ -152,10 +160,14 @@ export async function POST(req: Request) {
     if (!verificationResponse.ok) {
       const errorData = await verificationResponse.text();
       console.error("Lenco verification failed:", errorData);
-      return NextResponse.json(
+      const response = NextResponse.json(
         { message: "We could not verify the payment with Lenco yet." },
         { status: verificationResponse.status }
       );
+      response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      response.headers.set("Pragma", "no-cache");
+      response.headers.set("Expires", "0");
+      return response;
     }
 
     const verificationPayload = (await verificationResponse.json()) as {
@@ -172,7 +184,7 @@ export async function POST(req: Request) {
     const isSuccessful = paymentStatus === "successful" || paymentStatus === "completed" || paymentStatus === "paid" || settlementStatus === "settled";
 
     if (!isSuccessful) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         {
           message: "Payment is still pending confirmation.",
           paymentStatus,
@@ -180,6 +192,10 @@ export async function POST(req: Request) {
         },
         { status: 202 }
       );
+      response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      response.headers.set("Pragma", "no-cache");
+      response.headers.set("Expires", "0");
+      return response;
     }
 
     const normalizedEmail = body.email?.trim().toLowerCase();
@@ -195,13 +211,17 @@ export async function POST(req: Request) {
     });
 
     if (!user) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         {
           message: "Payment successful but your account could not be linked automatically.",
           subscriptionStatus: "User not found",
         },
         { status: 200 }
       );
+      response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      response.headers.set("Pragma", "no-cache");
+      response.headers.set("Expires", "0");
+      return response;
     }
 
     const subscriptionResult = await createSubscriptionForUser({
@@ -210,7 +230,7 @@ export async function POST(req: Request) {
       planId: body.planId,
     });
 
-    return NextResponse.json(
+    const response = NextResponse.json(
       {
         message: "Payment successful and subscription activated.",
         subscriptionStatus: "Subscription created",
@@ -218,6 +238,10 @@ export async function POST(req: Request) {
       },
       { status: 200 }
     );
+    response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    response.headers.set("Pragma", "no-cache");
+    response.headers.set("Expires", "0");
+    return response;
   } catch (error) {
     console.error("Payment processing error:", error);
     return NextResponse.json({ message: "Unable to process payment right now." }, { status: 500 });
