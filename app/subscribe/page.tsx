@@ -195,103 +195,86 @@ export default function SubscribePage() {
       return window.location.origin
     }
 
-    const mountFallbackWidget = () => {
-      const overlayId = "lenco-payment-overlay"
-      const existingOverlay = document.getElementById(overlayId)
-      if (existingOverlay) {
-        existingOverlay.remove()
+    const overlayId = "lenco-payment-overlay"
+    const existingOverlay = document.getElementById(overlayId)
+    if (existingOverlay) {
+      existingOverlay.remove()
+    }
+
+    const overlay = document.createElement("div")
+    overlay.id = overlayId
+    overlay.style.position = "fixed"
+    overlay.style.inset = "0"
+    overlay.style.zIndex = "999999"
+    overlay.style.background = "rgba(0, 0, 0, 0.75)"
+    overlay.style.display = "flex"
+    overlay.style.alignItems = "center"
+    overlay.style.justifyContent = "center"
+    overlay.style.padding = "16px"
+
+    const iframe = document.createElement("iframe")
+    iframe.setAttribute("title", "Lenco payment widget")
+    iframe.style.width = "100%"
+    iframe.style.maxWidth = "480px"
+    iframe.style.height = "80vh"
+    iframe.style.maxHeight = "760px"
+    iframe.style.border = "0"
+    iframe.style.borderRadius = "16px"
+    iframe.style.background = "#fff"
+
+    const closeWidget = () => {
+      overlay.remove()
+      window.removeEventListener("message", handleMessage)
+    }
+
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== "https://pay.sandbox.lenco.co" && event.origin !== "https://pay.lenco.co") {
+        return
       }
 
-      const overlay = document.createElement("div")
-      overlay.id = overlayId
-      overlay.style.position = "fixed"
-      overlay.style.inset = "0"
-      overlay.style.zIndex = "999999"
-      overlay.style.background = "rgba(0, 0, 0, 0.75)"
-      overlay.style.display = "flex"
-      overlay.style.alignItems = "center"
-      overlay.style.justifyContent = "center"
-      overlay.style.padding = "16px"
-
-      const iframe = document.createElement("iframe")
-      iframe.setAttribute("title", "Lenco payment widget")
-      iframe.setAttribute("allow", "payment")
-      iframe.style.width = "100%"
-      iframe.style.maxWidth = "480px"
-      iframe.style.height = "80vh"
-      iframe.style.maxHeight = "760px"
-      iframe.style.border = "0"
-      iframe.style.borderRadius = "16px"
-      iframe.style.background = "#fff"
-
-      const closeWidget = () => {
-        overlay.remove()
-        window.removeEventListener("message", handleMessage)
+      const payload = event.data
+      if (payload?.type === "lenco:close" || payload?.type === "callback:close") {
+        closeWidget()
+        config.onClose?.()
+      } else if (payload?.type === "callback:success") {
+        closeWidget()
+        config.onSuccess?.(payload.data || { reference: config.reference })
+      } else if (payload?.type === "callback:confirmation-pending") {
+        closeWidget()
+        config.onConfirmationPending?.()
       }
+    }
 
-      const handleMessage = (event: MessageEvent) => {
-        if (event.origin !== "https://pay.sandbox.lenco.co" && event.origin !== "https://pay.lenco.co") {
-          return
-        }
+    window.addEventListener("message", handleMessage)
 
-        const payload = event.data
-        if (payload?.type === "lenco:close" || payload?.type === "callback:close") {
-          closeWidget()
-          config.onClose?.()
-        } else if (payload?.type === "callback:success") {
-          closeWidget()
-          config.onSuccess?.(payload.data || { reference: config.reference })
-        } else if (payload?.type === "callback:confirmation-pending") {
-          config.onConfirmationPending?.()
-        }
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        closeWidget()
+        config.onClose?.()
       }
+    })
 
-      window.addEventListener("message", handleMessage)
-      overlay.addEventListener("click", (event) => {
-        if (event.target === overlay) {
-          closeWidget()
-          config.onClose?.()
-        }
-      })
-
-      iframe.onload = () => {
-        iframe.contentWindow?.postMessage(
-          {
-            type: "initialize",
-            data: {
-              key: config.key,
-              email: config.email,
-              reference: config.reference,
-              amount: Number(config.amount),
-              currency: config.currency || "ZMW",
-              channels: config.channels || [],
-              customer: config.customer,
-            },
+    iframe.onload = () => {
+      iframe.contentWindow?.postMessage(
+        {
+          type: "initialize",
+          data: {
+            key: config.key,
+            email: config.email,
+            reference: config.reference,
+            amount: Number(config.amount),
+            currency: config.currency || "ZMW",
+            channels: config.channels || [],
+            customer: config.customer,
           },
-          "https://pay.sandbox.lenco.co"
-        )
-      }
-
-      iframe.src = `https://pay.sandbox.lenco.co/popup?origin=${encodeURIComponent(resolvePopupOrigin())}`
-      overlay.appendChild(iframe)
-      document.body.appendChild(overlay)
+        },
+        "https://pay.sandbox.lenco.co"
+      )
     }
 
-    try {
-      window.LencoPay?.getPaid(config)
-      window.setTimeout(() => {
-        const widgetFrame = document.querySelector<HTMLIFrameElement>('iframe[id*="lenco-pay"]')
-        const visibleFrame = document.querySelector<HTMLIFrameElement>('iframe[style*="visibility: visible"]')
-        const frameIsVisible = Boolean(widgetFrame && widgetFrame.style.display !== "none" && widgetFrame.style.visibility !== "hidden")
-
-        if (!frameIsVisible && (!widgetFrame || !visibleFrame)) {
-          mountFallbackWidget()
-        }
-      }, 1800)
-    } catch (error) {
-      console.error("Unable to open Lenco payment widget.", error)
-      mountFallbackWidget()
-    }
+    iframe.src = `https://pay.sandbox.lenco.co/popup?origin=${encodeURIComponent(resolvePopupOrigin())}`
+    overlay.appendChild(iframe)
+    document.body.appendChild(overlay)
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
