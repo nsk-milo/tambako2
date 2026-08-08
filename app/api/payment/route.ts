@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getUserDataFromToken } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { activatePaidSubscription } from "@/lib/subscriptions";
+import { VerificationState, verifyPaymentByReference } from "@/lib/payments";
 import {
   FLW_CHANNEL,
   FLW_CURRENCY,
@@ -9,17 +9,13 @@ import {
   FlutterwaveError,
   FlutterwaveNetwork,
   assertFlutterwaveConfigured,
-  chargeFailureReason,
-  chargeMatchesPayment,
   createMobileMoneyCharge,
   detectNetwork,
   generatePaymentReference,
   isFailedStatus,
-  isSettledStatus,
   isValidNetwork,
   isValidReference,
   isValidZambianNumber,
-  retrieveCharge,
   splitCustomerName,
 } from "@/lib/flutterwave";
 
@@ -39,7 +35,6 @@ interface PaymentRequest {
   planId?: number | string;
   network?: string;
   phoneNumber?: string;
-  email?: string;
   fullName?: string;
   reference?: string;
 }
@@ -105,9 +100,14 @@ async function handleInitiate(userId: bigint, body: PaymentRequest) {
     ? body.network
     : detectNetwork(phoneNumber) ?? "MTN";
 
-  const email = body.email?.trim() || account.email;
+  // The receipt address is never taken from the request — it is whatever the
+  // signed-in account was registered with.
+  const email = account.email?.trim();
   if (!email) {
-    return noStore({ message: "An email address is required to complete payment." }, 400);
+    return noStore(
+      { message: "Your account has no email address. Add one to your profile to subscribe." },
+      400
+    );
   }
 
   const name = splitCustomerName(body.fullName?.trim() || account.name || "");
@@ -179,11 +179,22 @@ async function handleInitiate(userId: bigint, body: PaymentRequest) {
   });
 }
 
+/** The HTTP status each verification outcome answers with. */
+const VERIFY_HTTP_STATUS: Record<VerificationState, number> = {
+  successful: 200,
+  // Not an error: mobile money clears only once the customer approves the
+  // prompt on their handset, so the client keeps polling on a 202.
+  pending: 202,
+  failed: 402,
+  mismatch: 409,
+  unstarted: 409,
+  unknown: 404,
+};
+
 /**
- * Confirms a charge with Flutterwave and grants the subscription. Mobile money
- * clears after the customer approves the prompt on their handset, so a
- * `pending` result here is expected — the `charge.completed` webhook finishes
- * the activation, and the client keeps polling this endpoint meanwhile.
+ * Confirms a charge with Flutterwave and grants the subscription. This is the
+ * only way a subscription is activated — we do not take webhooks, so the answer
+ * always comes from re-reading the charge itself.
  */
 async function handleVerify(userId: bigint, body: PaymentRequest) {
   const reference = body.reference?.trim();
@@ -191,92 +202,19 @@ async function handleVerify(userId: bigint, body: PaymentRequest) {
     return noStore({ message: "Missing or malformed payment reference." }, 400);
   }
 
-  const payment = await prisma.payments.findUnique({
-    where: { reference },
-    include: { subscriptions: true },
-  });
+  const result = await verifyPaymentByReference(reference, { userId });
 
-  if (!payment || payment.user_id !== userId) {
-    return noStore({ message: "We have no record of that payment." }, 404);
-  }
-
-  if (payment.status === "successful") {
-    return noStore({
-      message: "Your subscription is already active.",
-      paymentStatus: "successful",
-      planType: payment.subscriptions.type,
-    });
-  }
-
-  if (!payment.charge_id) {
-    return noStore({ message: "That payment was never started with the gateway." }, 409);
-  }
-
-  const charge = await retrieveCharge(payment.charge_id);
-
-  if (!charge || (!isSettledStatus(charge.status) && !isFailedStatus(charge.status))) {
-    return noStore(
-      {
-        message:
-          "Your payment is still being confirmed. Approve the prompt on your phone — we will activate your subscription as soon as it clears.",
-        paymentStatus: charge?.status ?? "pending",
-      },
-      202
-    );
-  }
-
-  if (isFailedStatus(charge.status)) {
-    const reason = chargeFailureReason(charge);
-    await prisma.payments.updateMany({
-      where: { reference, status: { not: "successful" } },
-      data: {
-        status: "failed",
-        provider_reference: charge.reference ?? undefined,
-        failure_reason: reason?.slice(0, 255) ?? null,
-      },
-    });
-    return noStore(
-      {
-        message: reason || "The payment was declined. Please try again.",
-        paymentStatus: "failed",
-      },
-      402
-    );
-  }
-
-  // Succeeded — but only honour it if Flutterwave collected what the plan costs.
-  if (!chargeMatchesPayment(charge, Number(payment.amount), payment.currency)) {
-    console.error(
-      `Flutterwave amount mismatch on ${reference}: collected ${charge.amount} ${charge.currency}, expected ${payment.amount} ${payment.currency}`
-    );
-    await prisma.payments.updateMany({
-      where: { reference, status: { not: "successful" } },
-      data: { status: "mismatch", provider_reference: charge.reference ?? undefined },
-    });
-    return noStore(
-      {
-        message:
-          "The amount received does not match the plan price. Please contact support with your reference.",
-        paymentStatus: "mismatch",
-      },
-      409
-    );
-  }
-
-  const result = await activatePaidSubscription({
-    reference,
-    providerReference: charge.reference ?? charge.id,
-    channel: charge.payment_method_details?.type ?? payment.channel,
-  });
-
-  return noStore({
-    message: result
-      ? "Payment confirmed — your subscription is active."
-      : "Your subscription is already active.",
-    paymentStatus: "successful",
-    planType: payment.subscriptions.type,
-    expiresAt: result?.endDate ?? null,
-  });
+  return noStore(
+    {
+      message: result.message,
+      paymentStatus: result.state,
+      // What Flutterwave itself last said about the charge, for support.
+      chargeStatus: result.chargeStatus ?? null,
+      planType: result.planType,
+      expiresAt: result.expiresAt ?? null,
+    },
+    VERIFY_HTTP_STATUS[result.state]
+  );
 }
 
 /** Where Flutterwave sends the customer back after a hosted authorisation page. */

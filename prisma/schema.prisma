@@ -93,8 +93,9 @@ model subscriptions {
 }
 
 /// One row per Flutterwave charge. Created when the payment is initiated so the
-/// reference can be mapped back to a user and plan when the customer returns
-/// from the authorisation page or when Flutterwave posts a `charge.*` webhook.
+/// reference and charge id can be mapped back to a user and plan whenever the
+/// charge is verified — from the customer's own polling or the cron sweep.
+/// `status`: pending | successful | failed | mismatch | abandoned.
 model payments {
   payment_id         BigInt        @id @default(autoincrement())
   reference          String        @unique @db.VarChar(100)

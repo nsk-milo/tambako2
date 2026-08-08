@@ -1,12 +1,14 @@
-import { createHmac, randomUUID, timingSafeEqual } from "crypto";
+import { randomUUID } from "crypto";
 
 // Server-only helpers for the Flutterwave v4 "Payment Orchestrator" flow.
 // Docs: https://developer.flutterwave.com/docs/payment-orchestrator-flow
 //
 // The orchestrator combines customer creation and payment-method setup into a
 // single direct-charge call, which is what we want for one-off subscription
-// payments. Nothing in this file may be imported from a client component — the
-// client secret and the webhook hash must never reach the browser.
+// payments. We take no webhooks: a charge is only ever believed to have settled
+// after `GET /charges/{id}` says so (see lib/payments.ts). Nothing in this file
+// may be imported from a client component — the client secret must never reach
+// the browser.
 
 // Sandbox and production are separate environments with their own credentials;
 // a charge created in one is invisible to the other. Default to sandbox so a
@@ -19,8 +21,6 @@ const FLW_OAUTH_TOKEN_URL =
 
 const FLW_CLIENT_ID = process.env.FLW_CLIENT_ID || "";
 const FLW_CLIENT_SECRET = process.env.FLW_CLIENT_SECRET || "";
-/** The "secret hash" set on the dashboard's webhook page — not the client secret. */
-const FLW_SECRET_HASH = process.env.FLW_SECRET_HASH || "";
 
 /** Flutterwave settles per currency; our merchant account collects Kwacha. */
 export const FLW_CURRENCY = process.env.FLW_CURRENCY || "ZMW";
@@ -69,6 +69,7 @@ export type ChargeStatus =
   | "requires_action"
   | "succeeded"
   | "failed"
+  | "voided"
   | "cancelled"
   | "expired";
 
@@ -319,7 +320,9 @@ export function isSettledStatus(status: ChargeStatus) {
 }
 
 export function isFailedStatus(status: ChargeStatus) {
-  return status === "failed" || status === "cancelled" || status === "expired";
+  return (
+    status === "failed" || status === "voided" || status === "cancelled" || status === "expired"
+  );
 }
 
 /** A customer-facing explanation for a refused charge, when the gateway gave one. */
@@ -327,7 +330,8 @@ export function chargeFailureReason(charge: FlutterwaveCharge) {
   return (
     charge.processor_response?.type ||
     charge.issuer_response?.type ||
-    (charge.status === "expired" ? "The payment request expired before it was approved." : null)
+    (charge.status === "expired" ? "The payment request expired before it was approved." : null) ||
+    (charge.status === "voided" ? "The payment was voided before it settled." : null)
   );
 }
 
@@ -432,29 +436,3 @@ export function splitCustomerName(fullName: string): { first: string; last?: str
   return last.length >= 2 ? { first, last } : { first };
 }
 
-/* -------------------------------------------------------------------------- */
-/* Webhooks                                                                    */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Verifies the `flutterwave-signature` header: an HMAC-SHA256 of the raw
- * request body keyed by the secret hash, encoded as **base64** — not hex, and
- * therefore case-sensitive.
- *
- * The raw body is signed, so callers must not re-serialise a parsed object —
- * any difference in key order or whitespace produces a different digest and
- * would reject a genuine event.
- */
-export function verifyWebhookSignature(rawBody: string, signature: string | null): boolean {
-  if (!signature || !FLW_SECRET_HASH) return false;
-
-  const expected = createHmac("sha256", FLW_SECRET_HASH).update(rawBody).digest("base64");
-  return safeEqual(expected, signature.trim());
-}
-
-function safeEqual(a: string, b: string) {
-  const bufA = Buffer.from(a, "utf8");
-  const bufB = Buffer.from(b, "utf8");
-  if (bufA.length !== bufB.length) return false;
-  return timingSafeEqual(bufA, bufB);
-}

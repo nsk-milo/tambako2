@@ -25,8 +25,8 @@ export function periodEndDate(planType: string, from: Date) {
 /**
  * Marks a payment successful and grants the subscription it paid for, in one
  * transaction. Safe to call more than once for the same reference — the
- * customer's return from the authorisation page and the `charge.completed`
- * webhook usually both arrive — because the status update is conditional on the
+ * customer's polling page and the reconciliation sweep can verify the same
+ * charge at the same moment — because the status update is conditional on the
  * row still being unpaid.
  *
  * Returns `null` when the payment was already activated by an earlier call.
@@ -48,9 +48,9 @@ export async function activatePaidSubscription({
 
     if (!payment) return null;
 
-    // Claim the payment. `count === 0` means a concurrent caller (webhook vs.
-    // the customer's return from the gateway) got here first, so there is
-    // nothing left to do.
+    // Claim the payment. `count === 0` means a concurrent caller (the cron
+    // sweep vs. the customer's own polling) got here first, so there is nothing
+    // left to do.
     const claimed = await tx.payments.updateMany({
       where: { reference, status: { not: "successful" } },
       data: {

@@ -11,8 +11,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 // Where Flutterwave returns the customer after a hosted authorisation page.
 // The redirect proves the customer finished on their side, never that the money
 // arrived — so this page asks our own /api/payment verify endpoint, which
-// re-queries the charge. The `charge.completed` webhook activates the
-// subscription regardless of whether the customer ever lands back here.
+// re-queries the charge. If the customer never lands back here, the server's
+// reconciliation sweep verifies the same charge and activates the subscription.
 // https://developer.flutterwave.com/docs/payment-orchestrator-flow
 
 const POLL_INTERVAL_MS = 5000

@@ -8,8 +8,10 @@ import { Label } from "@/components/ui/label"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import {
   AlertDialog,
+  AlertDialogAction,
   AlertDialogContent,
   AlertDialogDescription,
+  AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
@@ -103,7 +105,6 @@ export default function SubscribePage() {
   const [plans, setPlans] = useState<SubscriptionPlan[]>([])
   const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan | null>(null)
   const [phoneNumber, setPhoneNumber] = useState("")
-  const [email, setEmail] = useState("")
   const [fullName, setFullName] = useState("")
   const [network, setNetwork] = useState<Network>("MTN")
   // Set once the customer picks a network by hand, so typing a number no longer
@@ -179,7 +180,6 @@ export default function SubscribePage() {
 
   const resetForm = () => {
     setSelectedPlan(null)
-    setEmail("")
     setPhoneNumber(currentUser?.phoneNumber || "")
     setFullName(currentUser?.username || "")
     setNetworkTouched(false)
@@ -189,8 +189,8 @@ export default function SubscribePage() {
    * Asks the server to confirm the charge with Flutterwave. A 202 means it has
    * not cleared yet, which is the normal state while the customer is still
    * holding their handset — so keep asking until it resolves or we give up.
-   * The `charge.completed` webhook activates the subscription regardless of
-   * whether this page is still open.
+   * Giving up here only stops this page: the server's reconciliation sweep goes
+   * on verifying the charge and activates the subscription when it clears.
    */
   const pollForConfirmation = async (reference: string) => {
     const deadline = Date.now() + POLL_TIMEOUT_MS
@@ -242,7 +242,7 @@ export default function SubscribePage() {
       await sleep(POLL_INTERVAL_MS)
     }
 
-    // Out of patience, not necessarily out of luck — the webhook still lands.
+    // Out of patience, not necessarily out of luck — the sweep still catches it.
     setAwaitingApproval(null)
     setDialogState({
       open: true,
@@ -279,11 +279,11 @@ export default function SubscribePage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!selectedPlan || !phoneNumber || !email || !fullName) {
+    if (!selectedPlan || !phoneNumber || !fullName) {
       setDialogState({
         open: true,
         title: "Missing Information",
-        description: "Please select a plan, provide your full name, email, and phone number.",
+        description: "Please select a plan and provide your full name and phone number.",
         type: "error",
       })
       return
@@ -292,14 +292,14 @@ export default function SubscribePage() {
     setLoading(true)
 
     try {
-      // The server owns the amount: it reads the price off the plan row, creates
-      // the Flutterwave charge and returns the reference it recorded for it.
+      // The server owns the amount and the customer's email: it reads the price
+      // off the plan row and the email off the account, creates the Flutterwave
+      // charge and returns the reference it recorded for it.
       const { data } = await axios.post("/api/payment", {
         action: "initiate",
         planId: selectedPlan.subscription_id,
         network,
         phoneNumber,
-        email,
         fullName,
       })
 
@@ -406,10 +406,6 @@ export default function SubscribePage() {
                       <Input id="fullName" type="text" placeholder="Enter your name" value={fullName} onChange={(e) => setFullName(e.target.value)} required className="bg-transparent" />
                     </motion.div>
                     <motion.div variants={formItemVariants} className="space-y-2">
-                      <Label htmlFor="email">Email Address</Label>
-                      <Input id="email" type="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} required className="bg-transparent" />
-                    </motion.div>
-                    <motion.div variants={formItemVariants} className="space-y-2">
                       <Label htmlFor="phoneNumber">Mobile Money Number</Label>
                       <Input id="phoneNumber" type="tel" placeholder="e.g., 0966123456" value={phoneNumber} onChange={(e) => setPhoneNumber(e.target.value)} required className="bg-transparent" />
                     </motion.div>
@@ -453,7 +449,12 @@ export default function SubscribePage() {
         </AnimatePresence>
       </div>
       {dialogState && (
-        <AlertDialog open={dialogState.open}>
+        <AlertDialog
+          open={dialogState.open}
+          onOpenChange={(open) => {
+            if (!open) setDialogState(null)
+          }}
+        >
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle
@@ -466,6 +467,11 @@ export default function SubscribePage() {
               </AlertDialogTitle>
               <AlertDialogDescription>{dialogState.description}</AlertDialogDescription>
             </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogAction onClick={() => setDialogState(null)}>
+                {dialogState.type === "success" ? "Done" : "Close"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
       )}
