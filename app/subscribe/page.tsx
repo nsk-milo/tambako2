@@ -30,30 +30,42 @@ interface SubscriptionPlan {
   popular?: boolean
 }
 
-interface LencoPaymentConfig {
-  key: string
-  reference: string
-  email: string
-  amount: number
-  currency: string
-  channels?: string[]
-  customer?: {
-    firstName?: string
-    lastName?: string
-    phone?: string
-  }
-  onSuccess?: (response: { reference: string }) => void
-  onClose?: () => void
-  onConfirmationPending?: () => void
+// Mobile money networks Flutterwave settles ZMW through, and the prefixes that
+// identify them, so the right one is preselected as the customer types.
+const NETWORKS = [
+  { value: "MTN", label: "MTN", prefixes: ["96", "76"] },
+  { value: "AIRTEL", label: "Airtel", prefixes: ["97", "77"] },
+  { value: "ZAMTEL", label: "Zamtel", prefixes: ["95", "75"] },
+] as const
+
+type Network = (typeof NETWORKS)[number]["value"]
+
+/** `0966123456`, `+260966123456` and `260966123456` all reduce to `966123456`. */
+const toNationalNumber = (phone: string) => {
+  const digits = phone.replace(/\D/g, "")
+  if (digits.startsWith("260")) return digits.slice(3)
+  if (digits.startsWith("0")) return digits.slice(1)
+  return digits
 }
 
-declare global {
-  interface Window {
-    LencoPay?: {
-      getPaid: (config: LencoPaymentConfig) => void
-    }
-  }
+const detectNetwork = (phone: string): Network | null => {
+  const prefix = toNationalNumber(phone).slice(0, 2)
+  return NETWORKS.find((network) => network.prefixes.includes(prefix as never))?.value ?? null
 }
+
+// What the customer still has to do after the charge is created. Mobile money
+// gives us either a hosted authorisation page or a push prompt on the handset.
+// https://developer.flutterwave.com/docs/payment-orchestrator-flow
+type NextAction =
+  | { type: "redirect_url"; redirect_url?: { url?: string } }
+  | { type: "payment_instruction"; payment_instruction?: { note?: string } }
+  | { type: string }
+
+/** How long to keep asking the server whether the charge cleared. */
+const POLL_INTERVAL_MS = 5000
+const POLL_TIMEOUT_MS = 3 * 60 * 1000
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const paymentFormVariants: Variants = {
   hidden: { opacity: 0, y: 50, scale: 0.98 },
@@ -93,8 +105,12 @@ export default function SubscribePage() {
   const [phoneNumber, setPhoneNumber] = useState("")
   const [email, setEmail] = useState("")
   const [fullName, setFullName] = useState("")
-  const [paymentMethod, setPaymentMethod] = useState("mobile-money")
+  const [network, setNetwork] = useState<Network>("MTN")
+  // Set once the customer picks a network by hand, so typing a number no longer
+  // overrides their choice.
+  const [networkTouched, setNetworkTouched] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [awaitingApproval, setAwaitingApproval] = useState<string | null>(null)
   const [dialogState, setDialogState] = useState<{
     open: boolean
     title: string
@@ -154,127 +170,111 @@ export default function SubscribePage() {
     }
   }, [currentUser])
 
-  const loadLencoScript = async () => {
-    if (typeof window === "undefined") return
+  // Keep the network in step with the number until the customer overrides it.
+  useEffect(() => {
+    if (networkTouched) return
+    const detected = detectNetwork(phoneNumber)
+    if (detected) setNetwork(detected)
+  }, [phoneNumber, networkTouched])
 
-    if (window.LencoPay) {
-      return
-    }
-
-    const scriptUrl = process.env.NEXT_PUBLIC_LENCO_WIDGET_URL || "https://pay.sandbox.lenco.co/js/v1/inline.js"
-
-    return new Promise<void>((resolve, reject) => {
-      const existingScript = document.querySelector<HTMLScriptElement>("script[data-lenco-payment]")
-      if (existingScript) {
-        existingScript.remove()
-      }
-
-      const script = document.createElement("script")
-      script.src = `${scriptUrl}${scriptUrl.includes("?") ? "&" : "?"}v=${Date.now()}`
-      script.async = true
-      script.setAttribute("data-lenco-payment", "true")
-      script.onload = () => resolve()
-      script.onerror = () => reject(new Error("Unable to load the Lenco payment widget."))
-      document.body.appendChild(script)
-    })
+  const resetForm = () => {
+    setSelectedPlan(null)
+    setEmail("")
+    setPhoneNumber(currentUser?.phoneNumber || "")
+    setFullName(currentUser?.username || "")
+    setNetworkTouched(false)
   }
 
-  const openLencoWidget = (config: LencoPaymentConfig) => {
-    if (typeof window === "undefined") return
+  /**
+   * Asks the server to confirm the charge with Flutterwave. A 202 means it has
+   * not cleared yet, which is the normal state while the customer is still
+   * holding their handset — so keep asking until it resolves or we give up.
+   * The `charge.completed` webhook activates the subscription regardless of
+   * whether this page is still open.
+   */
+  const pollForConfirmation = async (reference: string) => {
+    const deadline = Date.now() + POLL_TIMEOUT_MS
 
-    const resolvePopupOrigin = () => {
-      if (window.location.protocol === "https:") {
-        return window.location.origin
-      }
+    while (Date.now() < deadline) {
+      try {
+        const response = await axios.post(
+          "/api/payment",
+          { action: "verify", reference },
+          { validateStatus: (status) => status === 200 || status === 202 }
+        )
 
-      const hostname = window.location.hostname
-      if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0") {
-        return `https://${hostname}${window.location.port ? `:${window.location.port}` : ""}`
-      }
+        if (response.status === 200) {
+          setAwaitingApproval(null)
+          setDialogState({
+            open: true,
+            title: "Payment Successful",
+            description: response.data.message || "Your subscription has been activated.",
+            type: "success",
+          })
+          resetForm()
+          router.refresh()
+          return
+        }
+      } catch (err) {
+        // A dropped request says nothing about the charge — keep polling. Only
+        // a real answer from our server (402 declined, 409 mismatch, …) is
+        // terminal.
+        if (axios.isAxiosError(err) && !err.response) {
+          await sleep(POLL_INTERVAL_MS)
+          continue
+        }
 
-      return window.location.origin
-    }
-
-    const overlayId = "lenco-payment-overlay"
-    const existingOverlay = document.getElementById(overlayId)
-    if (existingOverlay) {
-      existingOverlay.remove()
-    }
-
-    const overlay = document.createElement("div")
-    overlay.id = overlayId
-    overlay.style.position = "fixed"
-    overlay.style.inset = "0"
-    overlay.style.zIndex = "999999"
-    overlay.style.background = "rgba(0, 0, 0, 0.75)"
-    overlay.style.display = "flex"
-    overlay.style.alignItems = "center"
-    overlay.style.justifyContent = "center"
-    overlay.style.padding = "16px"
-
-    const iframe = document.createElement("iframe")
-    iframe.setAttribute("title", "Lenco payment widget")
-    iframe.style.width = "100%"
-    iframe.style.maxWidth = "480px"
-    iframe.style.height = "80vh"
-    iframe.style.maxHeight = "760px"
-    iframe.style.border = "0"
-    iframe.style.borderRadius = "16px"
-    iframe.style.background = "#fff"
-
-    const closeWidget = () => {
-      overlay.remove()
-      window.removeEventListener("message", handleMessage)
-    }
-
-    const handleMessage = (event: MessageEvent) => {
-      if (event.origin !== "https://pay.sandbox.lenco.co" && event.origin !== "https://pay.lenco.co") {
+        setAwaitingApproval(null)
+        setDialogState({
+          open: true,
+          title: "Payment Not Completed",
+          description:
+            axios.isAxiosError(err) && err.response
+              ? err.response.data?.message || "Payment could not be verified."
+              : err instanceof Error
+              ? err.message
+              : "An unknown error occurred.",
+          type: "error",
+        })
         return
       }
 
-      const payload = event.data
-      if (payload?.type === "lenco:close" || payload?.type === "callback:close") {
-        closeWidget()
-        config.onClose?.()
-      } else if (payload?.type === "callback:success") {
-        closeWidget()
-        config.onSuccess?.(payload.data || { reference: config.reference })
-      } else if (payload?.type === "callback:confirmation-pending") {
-        closeWidget()
-        config.onConfirmationPending?.()
-      }
+      await sleep(POLL_INTERVAL_MS)
     }
 
-    window.addEventListener("message", handleMessage)
-
-    overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) {
-        closeWidget()
-        config.onClose?.()
-      }
+    // Out of patience, not necessarily out of luck — the webhook still lands.
+    setAwaitingApproval(null)
+    setDialogState({
+      open: true,
+      title: "Still Confirming",
+      description:
+        "We haven't had confirmation from your provider yet. If the payment went through, your subscription will activate automatically — refresh this page in a few minutes.",
+      type: "success",
     })
+  }
 
-    iframe.onload = () => {
-      iframe.contentWindow?.postMessage(
-        {
-          type: "initialize",
-          data: {
-            key: config.key,
-            email: config.email,
-            reference: config.reference,
-            amount: Number(config.amount),
-            currency: config.currency || "ZMW",
-            channels: config.channels || [],
-            customer: config.customer,
-          },
-        },
-        "https://pay.sandbox.lenco.co"
-      )
+  /** Acts on what Flutterwave says the customer still has to do. */
+  const handleNextAction = (nextAction: NextAction | null, reference: string) => {
+    if (nextAction?.type === "redirect_url") {
+      const url = (nextAction as { redirect_url?: { url?: string } }).redirect_url?.url
+      if (url) {
+        // Flutterwave returns the customer to /subscribe/callback?reference=...
+        window.location.href = url
+        return
+      }
     }
 
-    iframe.src = `https://pay.sandbox.lenco.co/popup?origin=${encodeURIComponent(resolvePopupOrigin())}`
-    overlay.appendChild(iframe)
-    document.body.appendChild(overlay)
+    if (nextAction?.type === "payment_instruction") {
+      const note = (nextAction as { payment_instruction?: { note?: string } }).payment_instruction
+        ?.note
+      setAwaitingApproval(
+        note || `Approve the payment prompt sent to ${phoneNumber} to activate your subscription.`
+      )
+    } else {
+      setAwaitingApproval("Waiting for your provider to confirm the payment…")
+    }
+
+    void pollForConfirmation(reference)
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -292,109 +292,22 @@ export default function SubscribePage() {
     setLoading(true)
 
     try {
-      await loadLencoScript()
+      // The server owns the amount: it reads the price off the plan row, creates
+      // the Flutterwave charge and returns the reference it recorded for it.
+      const { data } = await axios.post("/api/payment", {
+        action: "initiate",
+        planId: selectedPlan.subscription_id,
+        network,
+        phoneNumber,
+        email,
+        fullName,
+      })
 
-      const { data } = await axios.post(
-        "/api/payment",
-        {
-          action: "initiate",
-          amount: Number(selectedPlan.cost),
-          email,
-          phoneNumber,
-          customerName: fullName,
-          channels: [paymentMethod],
-        },
-        {
-          headers: {
-            "Cache-Control": "no-cache",
-            Pragma: "no-cache",
-          },
-        }
-      )
-
-      if (!data?.publicKey || !data.reference) {
+      if (!data?.reference) {
         throw new Error("The payment gateway is not configured correctly.")
       }
 
-      const firstName = fullName.split(" ")[0] || fullName
-      const lastName = fullName.split(" ").slice(1).join(" ") || ""
-
-      openLencoWidget({
-        key: data.publicKey,
-        reference: data.reference,
-        email,
-        amount: Number(data.amount),
-        currency: data.currency || "ZMW",
-        channels: data.channels || [paymentMethod],
-        customer: {
-          firstName,
-          lastName,
-          phone: phoneNumber,
-        },
-        onSuccess: async (response) => {
-          try {
-            const verifyResponse = await axios.post(
-              "/api/payment",
-              {
-                action: "verify",
-                reference: response.reference,
-                amount: Number(selectedPlan.cost),
-                email,
-                phoneNumber,
-                customerName: fullName,
-                planId: selectedPlan.subscription_id,
-              },
-              {
-                headers: {
-                  "Cache-Control": "no-cache",
-                  Pragma: "no-cache",
-                },
-              }
-            )
-
-            setDialogState({
-              open: true,
-              title: "Payment Successful",
-              description: verifyResponse.data.message || "Your subscription has been activated.",
-              type: "success",
-            })
-            setSelectedPlan(null)
-            setEmail("")
-            setPhoneNumber(currentUser?.phoneNumber || "")
-            setFullName(currentUser?.username || "")
-          } catch (err) {
-            const errorMessage =
-              axios.isAxiosError(err) && err.response
-                ? err.response.data.message || "Payment could not be verified."
-                : err instanceof Error
-                ? err.message
-                : "An unknown error occurred."
-
-            setDialogState({
-              open: true,
-              title: "Payment Verification Failed",
-              description: errorMessage,
-              type: "error",
-            })
-          }
-        },
-        onClose: () => {
-          setDialogState({
-            open: true,
-            title: "Payment Cancelled",
-            description: "You closed the payment window before completing the transaction.",
-            type: "error",
-          })
-        },
-        onConfirmationPending: () => {
-          setDialogState({
-            open: true,
-            title: "Payment Pending",
-            description: "Your payment is being confirmed. We will activate your subscription once it is verified.",
-            type: "success",
-          })
-        },
-      })
+      handleNextAction(data.nextAction ?? null, data.reference)
     } catch (err) {
       const errorMessage =
         axios.isAxiosError(err) && err.response
@@ -497,25 +410,39 @@ export default function SubscribePage() {
                       <Input id="email" type="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} required className="bg-transparent" />
                     </motion.div>
                     <motion.div variants={formItemVariants} className="space-y-2">
-                      <Label htmlFor="phoneNumber">Phone Number</Label>
+                      <Label htmlFor="phoneNumber">Mobile Money Number</Label>
                       <Input id="phoneNumber" type="tel" placeholder="e.g., 0966123456" value={phoneNumber} onChange={(e) => setPhoneNumber(e.target.value)} required className="bg-transparent" />
                     </motion.div>
                     <motion.div variants={formItemVariants} className="space-y-2">
-                      <Label>Preferred Payment Method</Label>
-                      <RadioGroup className="flex gap-4" onValueChange={setPaymentMethod} value={paymentMethod}>
-                        <div className="flex items-center space-x-2">
-                          <RadioGroupItem value="mobile-money" id="mobile-money" />
-                          <Label htmlFor="mobile-money">Mobile Money</Label>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <RadioGroupItem value="card" id="card" />
-                          <Label htmlFor="card">Card</Label>
-                        </div>
+                      <Label>Network</Label>
+                      <RadioGroup
+                        className="flex gap-4"
+                        value={network}
+                        onValueChange={(value) => {
+                          setNetwork(value as Network)
+                          setNetworkTouched(true)
+                        }}
+                      >
+                        {NETWORKS.map((option) => (
+                          <div key={option.value} className="flex items-center space-x-2">
+                            <RadioGroupItem value={option.value} id={option.value} />
+                            <Label htmlFor={option.value}>{option.label}</Label>
+                          </div>
+                        ))}
                       </RadioGroup>
                     </motion.div>
+                    {awaitingApproval && (
+                      <motion.div
+                        variants={formItemVariants}
+                        className="flex items-start gap-3 rounded-md border border-primary/40 bg-primary/10 p-3 text-sm"
+                      >
+                        <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-primary" />
+                        <span>{awaitingApproval}</span>
+                      </motion.div>
+                    )}
                     <motion.div variants={formItemVariants}>
-                      <Button type="submit" className="w-full" disabled={loading}>
-                        {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Pay K{Number(selectedPlan.cost).toFixed(2)}
+                      <Button type="submit" className="w-full" disabled={loading || !!awaitingApproval}>
+                        {(loading || !!awaitingApproval) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Pay K{Number(selectedPlan.cost).toFixed(2)}
                       </Button>
                     </motion.div>
                   </form>
