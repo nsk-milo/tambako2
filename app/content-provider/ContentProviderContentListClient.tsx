@@ -7,7 +7,9 @@ type ContentItem = {
   id: string;
   title: string;
   duration: number | null;
+  /** Views that earned — see the note on the dashboard for what counts. */
   totalViews: number;
+  monthlyViews?: number;
   uniqueViews: number;
   minutesConsumed: number;
   revenueEarned: number;
@@ -54,14 +56,20 @@ export default function ContentProviderContentListClient({ initialItems, noConte
               <CardContent>
                 <div className="space-y-3">
                   <div className="border-t pt-3">
-                    <h4 className="text-sm font-semibold text-foreground mb-2">Views</h4>
-                    <div className="grid grid-cols-2 gap-3 text-sm">
+                    <h4 className="text-sm font-semibold text-foreground mb-2">Paid Views</h4>
+                    <div className="grid grid-cols-3 gap-3 text-sm">
                       <div>
-                        <p className="text-muted-foreground">Total Views</p>
+                        <p className="text-muted-foreground">All time</p>
                         <p className="text-lg font-semibold">{item.totalViews.toLocaleString()}</p>
                       </div>
                       <div>
-                        <p className="text-muted-foreground">Unique Views</p>
+                        <p className="text-muted-foreground">This month</p>
+                        <p className="text-lg font-semibold">
+                          {(item.monthlyViews ?? 0).toLocaleString()}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-muted-foreground">Viewers</p>
                         <p className="text-lg font-semibold">{item.uniqueViews.toLocaleString()}</p>
                       </div>
                     </div>
@@ -80,15 +88,15 @@ export default function ContentProviderContentListClient({ initialItems, noConte
                   <div className="border-t pt-3 bg-accent/30 dark:bg-accent/10 -mx-6 -mb-6 px-6 py-3">
                     <div className="flex justify-between items-center">
                       <div>
-                        <p className="text-sm text-muted-foreground">Revenue (50% Share)</p>
+                        <p className="text-sm text-muted-foreground">Earnings (K0.08 per view)</p>
                         <p className="text-2xl font-bold text-primary">K{item.revenueEarned.toFixed(2)}</p>
                         {item.monthlyEarnings !== undefined && (
-                          <p className="text-xs text-muted-foreground">Monthly: K{item.monthlyEarnings.toFixed(2)}</p>
+                          <p className="text-xs text-muted-foreground">This month: K{item.monthlyEarnings.toFixed(2)}</p>
                         )}
                       </div>
                       <div className="text-right text-xs text-muted-foreground">
-                        <p>Your earnings</p>
-                        <p>this month</p>
+                        <p>Total earned</p>
+                        <p>all time</p>
                       </div>
                     </div>
                   </div>

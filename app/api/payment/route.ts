@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { Prisma } from "@/lib/generated/prisma";
 import { getUserDataFromToken } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { VerificationState, verifyPaymentByReference } from "@/lib/payments";
+import { isUpgradeFrom, quoteUpgrade } from "@/lib/plans";
 import {
   FLW_CHANNEL,
   FLW_CURRENCY,
@@ -37,6 +39,8 @@ interface PaymentRequest {
   phoneNumber?: string;
   fullName?: string;
   reference?: string;
+  /** Ask for the charge to be priced as an upgrade off the running plan. */
+  upgrade?: boolean;
 }
 
 export async function POST(req: Request) {
@@ -110,6 +114,10 @@ async function handleInitiate(userId: bigint, body: PaymentRequest) {
     );
   }
 
+  if (!plan.is_active) {
+    return noStore({ message: "That subscription plan is no longer offered." }, 409);
+  }
+
   const name = splitCustomerName(body.fullName?.trim() || account.name || "");
   if (!name) {
     return noStore(
@@ -118,19 +126,34 @@ async function handleInitiate(userId: bigint, body: PaymentRequest) {
     );
   }
 
+  // An upgrade is priced here, from the running subscription — never from the
+  // amount the client asked for.
+  const upgrade = body.upgrade ? await priceUpgrade(userId, plan) : null;
+  if (body.upgrade && !upgrade) {
+    return noStore(
+      {
+        message:
+          "That plan is not an upgrade on your current one. Choose a higher plan, or subscribe to it when your current plan ends.",
+      },
+      409
+    );
+  }
+
   const reference = generatePaymentReference(userId);
-  const amount = Number(plan.cost);
+  const amount = upgrade ? upgrade.amountDue : Number(plan.cost);
 
   await prisma.payments.create({
     data: {
       reference,
       user_id: userId,
       subscription_id: plan.subscription_id,
-      amount: plan.cost,
+      amount,
       currency: FLW_CURRENCY,
       status: "pending",
       channel: FLW_CHANNEL,
       network,
+      is_upgrade: Boolean(upgrade),
+      credit_amount: upgrade ? upgrade.credit : 0,
     },
   });
 
@@ -170,12 +193,51 @@ async function handleInitiate(userId: bigint, body: PaymentRequest) {
     reference,
     chargeId: charge.id,
     amount,
+    isUpgrade: Boolean(upgrade),
+    credit: upgrade?.credit ?? 0,
     currency: FLW_CURRENCY,
     network,
     paymentStatus: charge.status,
     // Whatever the customer still has to do: approve a push prompt on their
     // handset, or visit a hosted authorisation page.
     nextAction: charge.next_action ?? null,
+  });
+}
+
+/**
+ * Prices a move onto `plan` from whatever the customer is running now, or
+ * returns null when it is not an upgrade — no active plan, the same plan, or a
+ * cheaper one. Those are ordinary purchases and stack onto the current period.
+ */
+async function priceUpgrade(
+  userId: bigint,
+  plan: { subscription_id: number; cost: Prisma.Decimal }
+) {
+  const current = await prisma.user_subscriptions.findFirst({
+    where: { user_id: userId, is_active: true },
+    orderBy: { end_date: "desc" },
+    include: { subscriptions: true },
+  });
+
+  const now = new Date();
+  if (!current || current.end_date <= now) return null;
+
+  const currentCost = Number(current.subscriptions.cost);
+  if (
+    !isUpgradeFrom(
+      { subscription_id: current.subscriptions.subscription_id, cost: currentCost },
+      { subscription_id: plan.subscription_id, cost: Number(plan.cost) }
+    )
+  ) {
+    return null;
+  }
+
+  return quoteUpgrade({
+    currentPlan: current.subscriptions,
+    currentPlanCost: currentCost,
+    currentEndDate: current.end_date,
+    newPlanCost: Number(plan.cost),
+    now,
   });
 }
 

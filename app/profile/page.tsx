@@ -36,6 +36,7 @@ import {
   CreditCard,
   XCircle,
   PlusCircle,
+  ArrowUpCircle,
   Lock,
   Eye,
   EyeOff,
@@ -54,9 +55,20 @@ interface Subscription {
   subscriptions: {
     type: string;
     cost: number;
+    period_label?: string | null;
   };
   is_active: boolean;
   end_date: string;
+}
+
+/** The cheapest step up from the current plan, once the unused days are credited. */
+interface UpgradeOption {
+  subscription_id: number;
+  type: string;
+  cost: string;
+  period_label: string;
+  credit: number;
+  amount_due: number;
 }
 
 export default function ProfilePage() {
@@ -66,6 +78,7 @@ export default function ProfilePage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [upgradeOptions, setUpgradeOptions] = useState<UpgradeOption[]>([]);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -85,6 +98,15 @@ export default function ProfilePage() {
         setUser(userData);
 
         if (userData?.userId) {
+          // What they could move up to, priced with the days they have left
+          // credited back. Empty when they are on the top plan or have none.
+          axios
+            .get<{ options: UpgradeOption[] }>("/api/subscriptions/upgrade")
+            .then(({ data }) => setUpgradeOptions(data.options ?? []))
+            .catch((upgradeError) => {
+              console.error("Failed to load upgrade options", upgradeError);
+            });
+
           try {
             const subResponse = await axios.get(
               `/api/user_subscriptions/${userData.userId}`
@@ -141,6 +163,18 @@ export default function ProfilePage() {
   const handleAddSubscription = () => {
     router.push("/subscribe");
   };
+
+  const handleUpgradeSubscription = () => {
+    router.push("/subscribe?upgrade=1");
+  };
+
+  // The cheapest step up, used to show what upgrading would cost today.
+  const cheapestUpgrade = upgradeOptions.reduce<UpgradeOption | null>(
+    (cheapest, option) =>
+      !cheapest || option.amount_due < cheapest.amount_due ? option : cheapest,
+    null
+  );
+  const canUpgrade = Boolean(subscription?.is_active && cheapestUpgrade);
 
   const handleUpdatePassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -272,7 +306,9 @@ export default function ProfilePage() {
                               <div>
                                 <p className="text-sm text-muted-foreground">Price</p>
                                 <p className="font-medium">
-                                  K{subscription.subscriptions.cost} / {subscription.subscriptions.type}
+                                  K{subscription.subscriptions.cost} /{" "}
+                                  {subscription.subscriptions.period_label ||
+                                    subscription.subscriptions.type}
                                 </p>
                               </div>
                             </div>
@@ -293,7 +329,26 @@ export default function ProfilePage() {
                               </div>
                             </div>
                           </CardContent>
-                          <CardFooter>
+                          {canUpgrade && cheapestUpgrade && (
+                            <CardContent className="pt-0">
+                              <div className="rounded-lg border border-primary/40 bg-primary/10 p-3 text-sm">
+                                <p className="font-medium">Move up to a bigger plan</p>
+                                <p className="text-muted-foreground">
+                                  {upgradeOptions.length === 1
+                                    ? `${cheapestUpgrade.type} costs K${cheapestUpgrade.amount_due.toFixed(2)} today`
+                                    : `From K${cheapestUpgrade.amount_due.toFixed(2)} today`}{" "}
+                                  — the days left on this plan come off the price.
+                                </p>
+                              </div>
+                            </CardContent>
+                          )}
+                          <CardFooter className="flex flex-wrap gap-3">
+                            {canUpgrade && (
+                              <Button onClick={handleUpgradeSubscription}>
+                                <ArrowUpCircle className="mr-2 h-4 w-4" />
+                                Upgrade Plan
+                              </Button>
+                            )}
                             {subscription.is_active ? (
                               <AlertDialog>
                                 <AlertDialogTrigger asChild>

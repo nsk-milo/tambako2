@@ -1,10 +1,15 @@
 import { PrismaClient } from "@/lib/generated/prisma";
+import { VIEW_PAYOUT_AMOUNT, monthKey } from "@/lib/views";
 
 type ProviderAnalyticsItem = {
   id: string;
   title: string;
   duration: number | null;
+  /** Qualifying views all-time — see `lib/views.ts` for what earns one. */
   totalViews: number;
+  /** Qualifying views this calendar month. */
+  monthlyViews: number;
+  /** Distinct viewers who have ever earned this title a view. */
   uniqueViews: number;
   minutesConsumed: number;
   monthlyMinutes: number;
@@ -17,6 +22,7 @@ type ProviderPerformance = {
   providerName: string | null;
   providerEmail: string | null;
   totalViews: number;
+  monthlyViews: number;
   uniqueViews: number;
   minutesConsumed: number;
   monthlyMinutes: number;
@@ -31,17 +37,29 @@ const startOfMonth = (date: Date) =>
 const endOfMonth = (date: Date) =>
   new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59, 999);
 
+const round2 = (value: number) => Number(value.toFixed(2));
+
 export async function getRevenueSummary(prisma: PrismaClient, now = new Date()) {
   const monthStart = startOfMonth(now);
   const monthEnd = endOfMonth(now);
+  const month = monthKey(now);
 
-  const [totalRevenueAgg, monthlyRevenueAgg] = await Promise.all([
-    prisma.transactions.aggregate({ _sum: { amount: true } }),
-    prisma.transactions.aggregate({
-      _sum: { amount: true },
-      where: { created_at: { gte: monthStart, lte: monthEnd } },
-    }),
-  ]);
+  const [totalRevenueAgg, monthlyRevenueAgg, payoutsAgg, monthlyPayoutsAgg] =
+    await Promise.all([
+      prisma.transactions.aggregate({ _sum: { amount: true } }),
+      prisma.transactions.aggregate({
+        _sum: { amount: true },
+        where: { created_at: { gte: monthStart, lte: monthEnd } },
+      }),
+      // What creators have earned per view, which is what the platform owes
+      // them — as opposed to the notional 50% share below.
+      prisma.media_views.aggregate({ _sum: { payout_amount: true }, _count: true }),
+      prisma.media_views.aggregate({
+        _sum: { payout_amount: true },
+        _count: true,
+        where: { month },
+      }),
+    ]);
 
   const totalRevenue = Number(totalRevenueAgg._sum.amount || 0);
   const monthlyRevenue = Number(monthlyRevenueAgg._sum.amount || 0);
@@ -53,6 +71,11 @@ export async function getRevenueSummary(prisma: PrismaClient, now = new Date()) 
     adminShareMonthly: monthlyRevenue * 0.5,
     providerShareTotal: totalRevenue * 0.5,
     providerShareMonthly: monthlyRevenue * 0.5,
+    creatorPayoutsTotal: round2(Number(payoutsAgg._sum.payout_amount || 0)),
+    creatorPayoutsMonthly: round2(Number(monthlyPayoutsAgg._sum.payout_amount || 0)),
+    qualifyingViewsTotal: payoutsAgg._count,
+    qualifyingViewsMonthly: monthlyPayoutsAgg._count,
+    viewPayoutRate: VIEW_PAYOUT_AMOUNT,
   };
 }
 
@@ -96,54 +119,114 @@ export async function getSubscriptionActivity(prisma: PrismaClient) {
   };
 }
 
+interface MediaStats {
+  totalViews: number;
+  monthlyViews: number;
+  uniqueViews: number;
+  minutesConsumed: number;
+  monthlyMinutes: number;
+  revenueEarned: number;
+  monthlyEarnings: number;
+}
+
+const emptyStats = (): MediaStats => ({
+  totalViews: 0,
+  monthlyViews: 0,
+  uniqueViews: 0,
+  minutesConsumed: 0,
+  monthlyMinutes: 0,
+  revenueEarned: 0,
+  monthlyEarnings: 0,
+});
+
+/**
+ * Views, watch time and earnings for a set of titles, in a handful of queries
+ * rather than a handful per title.
+ *
+ * Views and earnings come from `media_views` — the rows that were actually
+ * earned. Watch time still comes from the raw history, counting each viewer's
+ * furthest point in a title once: the tracker appends a row every few seconds,
+ * so summing every row would multiply the same minutes over and over.
+ */
 async function getMediaStats(
   prisma: PrismaClient,
-  mediaId: bigint,
-  monthStart: Date,
-  monthEnd: Date
-) {
-  const [totalViews, uniqueRows, minutesAgg, monthlyMinutesAgg] =
-    await Promise.all([
-      prisma.watch_history.count({ where: { media_id: mediaId } }),
-      prisma.watch_history.findMany({
-        where: { media_id: mediaId },
-        select: { user_id: true },
-      }),
-      prisma.watch_history.aggregate({
-        _sum: { progress: true },
-        where: { media_id: mediaId },
-      }),
-      prisma.watch_history.aggregate({
-        _sum: { progress: true },
-        where: {
-          media_id: mediaId,
-          watched_at: { gte: monthStart, lte: monthEnd },
-        },
-      }),
-    ]);
+  mediaIds: bigint[],
+  now: Date
+): Promise<Map<string, MediaStats>> {
+  const stats = new Map<string, MediaStats>(
+    mediaIds.map((id) => [String(id), emptyStats()])
+  );
 
-  const uniqueViews = new Set(uniqueRows.map((row) => String(row.user_id))).size;
-  const totalProgress = Number(minutesAgg._sum.progress || 0);
-  const monthlyProgress = Number(monthlyMinutesAgg._sum.progress || 0);
+  if (mediaIds.length === 0) return stats;
 
-  const minutesConsumed = totalProgress > 0 ? totalProgress / 60 : 0;
-  const monthlyMinutes = monthlyProgress > 0 ? monthlyProgress / 60 : 0;
+  const month = monthKey(now);
+  const monthStart = startOfMonth(now);
+  const monthEnd = endOfMonth(now);
 
-  return {
-    totalViews,
-    uniqueViews,
-    minutesConsumed,
-    monthlyMinutes,
-  };
+  const [viewRows, historyRows, monthlyHistoryRows] = await Promise.all([
+    prisma.media_views.findMany({
+      where: { media_id: { in: mediaIds } },
+      select: { media_id: true, user_id: true, month: true, payout_amount: true },
+    }),
+    prisma.watch_history.groupBy({
+      by: ["media_id", "user_id"],
+      where: { media_id: { in: mediaIds } },
+      _max: { progress: true },
+    }),
+    prisma.watch_history.groupBy({
+      by: ["media_id", "user_id"],
+      where: {
+        media_id: { in: mediaIds },
+        watched_at: { gte: monthStart, lte: monthEnd },
+      },
+      _max: { progress: true },
+    }),
+  ]);
+
+  const viewers = new Map<string, Set<string>>();
+
+  for (const row of viewRows) {
+    const key = String(row.media_id);
+    const entry = stats.get(key);
+    if (!entry) continue;
+
+    const payout = Number(row.payout_amount);
+    entry.totalViews += 1;
+    entry.revenueEarned += payout;
+
+    if (row.month === month) {
+      entry.monthlyViews += 1;
+      entry.monthlyEarnings += payout;
+    }
+
+    if (!viewers.has(key)) viewers.set(key, new Set());
+    viewers.get(key)!.add(String(row.user_id));
+  }
+
+  for (const [key, entry] of stats) {
+    entry.uniqueViews = viewers.get(key)?.size ?? 0;
+  }
+
+  for (const row of historyRows) {
+    const entry = row.media_id ? stats.get(String(row.media_id)) : undefined;
+    if (entry) entry.minutesConsumed += Number(row._max.progress || 0) / 60;
+  }
+
+  for (const row of monthlyHistoryRows) {
+    const entry = row.media_id ? stats.get(String(row.media_id)) : undefined;
+    if (entry) entry.monthlyMinutes += Number(row._max.progress || 0) / 60;
+  }
+
+  return stats;
 }
 
 export async function getProviderPerformance(
   prisma: PrismaClient,
-  revenueSummary: Awaited<ReturnType<typeof getRevenueSummary>>
+  // Kept in the signature so callers need not change; creator earnings no
+  // longer come out of the subscription split, they are paid per view.
+  _revenueSummary?: Awaited<ReturnType<typeof getRevenueSummary>>
 ) {
   const now = new Date();
-  const monthStart = startOfMonth(now);
-  const monthEnd = endOfMonth(now);
 
   const providers = await prisma.users.findMany({
     where: { role: { name: "ContentCreator" } },
@@ -157,95 +240,53 @@ export async function getProviderPerformance(
     },
   });
 
-  const providerAnalytics: ProviderPerformance[] = [];
+  const mediaIds = providers.flatMap((provider) =>
+    provider.provided_media.map((item) => item.media_id)
+  );
+  const stats = await getMediaStats(prisma, mediaIds, now);
+
   let totalPlatformMinutes = 0;
   let totalPlatformMonthlyMinutes = 0;
 
-  for (const provider of providers) {
-    let providerMinutes = 0;
-    let providerMonthlyMinutes = 0;
-    let providerViews = 0;
-    let providerUniqueViews = 0;
+  const providerPerformance: ProviderPerformance[] = providers.map((provider) => {
+    const items: ProviderAnalyticsItem[] = provider.provided_media.map((mediaItem) => {
+      const itemStats = stats.get(String(mediaItem.media_id)) ?? emptyStats();
 
-    const items: ProviderAnalyticsItem[] = [];
-
-    for (const mediaItem of provider.provided_media) {
-      const stats = await getMediaStats(
-        prisma,
-        mediaItem.media_id,
-        monthStart,
-        monthEnd
-      );
-
-      providerMinutes += stats.minutesConsumed;
-      providerMonthlyMinutes += stats.monthlyMinutes;
-      providerViews += stats.totalViews;
-      providerUniqueViews += stats.uniqueViews;
-
-      items.push({
+      return {
         id: String(mediaItem.media_id),
         title: mediaItem.title,
         duration: mediaItem.duration,
-        totalViews: stats.totalViews,
-        uniqueViews: stats.uniqueViews,
-        minutesConsumed: Number(stats.minutesConsumed.toFixed(2)),
-        monthlyMinutes: Number(stats.monthlyMinutes.toFixed(2)),
-        revenueEarned: 0,
-        monthlyEarnings: 0,
-      });
-    }
-
-    totalPlatformMinutes += providerMinutes;
-    totalPlatformMonthlyMinutes += providerMonthlyMinutes;
-
-    providerAnalytics.push({
-      providerId: String(provider.user_id),
-      providerName: provider.name,
-      providerEmail: provider.email,
-      totalViews: providerViews,
-      uniqueViews: providerUniqueViews,
-      minutesConsumed: Number(providerMinutes.toFixed(2)),
-      monthlyMinutes: Number(providerMonthlyMinutes.toFixed(2)),
-      revenueEarned: 0,
-      monthlyRevenueEarned: 0,
-      items,
-    });
-  }
-
-  const providerPerformance = providerAnalytics.map((provider) => {
-    const providerShare =
-      totalPlatformMinutes > 0
-        ? revenueSummary.providerShareTotal *
-          (provider.minutesConsumed / totalPlatformMinutes)
-        : 0;
-    const providerMonthlyShare =
-      totalPlatformMonthlyMinutes > 0
-        ? revenueSummary.providerShareMonthly *
-          (provider.monthlyMinutes / totalPlatformMonthlyMinutes)
-        : 0;
-
-    const updatedItems = provider.items.map((item) => {
-      const itemRevenue =
-        provider.minutesConsumed > 0
-          ? providerShare * (item.minutesConsumed / provider.minutesConsumed)
-          : 0;
-      const itemMonthly =
-        provider.monthlyMinutes > 0
-          ? providerMonthlyShare * (item.monthlyMinutes / provider.monthlyMinutes)
-          : 0;
-
-      return {
-        ...item,
-        revenueEarned: Number(itemRevenue.toFixed(2)),
-        monthlyEarnings: Number(itemMonthly.toFixed(2)),
+        totalViews: itemStats.totalViews,
+        monthlyViews: itemStats.monthlyViews,
+        uniqueViews: itemStats.uniqueViews,
+        minutesConsumed: round2(itemStats.minutesConsumed),
+        monthlyMinutes: round2(itemStats.monthlyMinutes),
+        revenueEarned: round2(itemStats.revenueEarned),
+        monthlyEarnings: round2(itemStats.monthlyEarnings),
       };
     });
 
+    const sum = (pick: (item: ProviderAnalyticsItem) => number) =>
+      items.reduce((total, item) => total + pick(item), 0);
+
+    const minutesConsumed = sum((item) => item.minutesConsumed);
+    const monthlyMinutes = sum((item) => item.monthlyMinutes);
+
+    totalPlatformMinutes += minutesConsumed;
+    totalPlatformMonthlyMinutes += monthlyMinutes;
+
     return {
-      ...provider,
-      revenueEarned: Number(providerShare.toFixed(2)),
-      monthlyRevenueEarned: Number(providerMonthlyShare.toFixed(2)),
-      items: updatedItems,
+      providerId: String(provider.user_id),
+      providerName: provider.name,
+      providerEmail: provider.email,
+      totalViews: sum((item) => item.totalViews),
+      monthlyViews: sum((item) => item.monthlyViews),
+      uniqueViews: sum((item) => item.uniqueViews),
+      minutesConsumed: round2(minutesConsumed),
+      monthlyMinutes: round2(monthlyMinutes),
+      revenueEarned: round2(sum((item) => item.revenueEarned)),
+      monthlyRevenueEarned: round2(sum((item) => item.monthlyEarnings)),
+      items,
     };
   });
 
@@ -274,8 +315,7 @@ export async function getProviderAnalytics(
   prisma: PrismaClient,
   providerId: number
 ) {
-  const revenue = await getRevenueSummary(prisma);
-  const { providerPerformance } = await getProviderPerformance(prisma, revenue);
+  const { providerPerformance } = await getProviderPerformance(prisma);
   const provider = providerPerformance.find(
     (item) => item.providerId === String(providerId)
   );
@@ -288,6 +328,9 @@ export async function getProviderAnalytics(
         providerMonthlyMinutes: 0,
         providerShareTotal: 0,
         providerShareMonthly: 0,
+        totalViews: 0,
+        monthlyViews: 0,
+        viewPayoutRate: VIEW_PAYOUT_AMOUNT,
       },
       message:
         "No media found for this provider (ensure media.provider_id exists).",
@@ -299,8 +342,13 @@ export async function getProviderAnalytics(
     providerTotals: {
       providerTotalMinutes: provider.minutesConsumed,
       providerMonthlyMinutes: provider.monthlyMinutes,
+      // Earnings, at the per-view rate — the name is kept for the dashboard and
+      // withdrawal code that reads it.
       providerShareTotal: provider.revenueEarned,
       providerShareMonthly: provider.monthlyRevenueEarned,
+      totalViews: provider.totalViews,
+      monthlyViews: provider.monthlyViews,
+      viewPayoutRate: VIEW_PAYOUT_AMOUNT,
     },
   };
 }

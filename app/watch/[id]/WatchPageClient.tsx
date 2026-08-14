@@ -13,9 +13,12 @@ import {
   ArrowLeft,
   Crown,
   Loader2,
+  PauseCircle,
+  PlayCircle,
   Settings,
   SkipBack,
   SkipForward,
+  VolumeX,
 } from "lucide-react";
 
 interface VideoSource {
@@ -74,6 +77,12 @@ export default function WatchPageClient({ id }: { id: string }) {
   const hlsRef = useRef<Hls | null>(null);
   const trackingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastTrackedProgressRef = useRef<number>(0);
+  // Play the next episode when this one ends. Held in a ref so the `ended`
+  // listener, which is attached once per source, always calls the current one.
+  const autoAdvanceRef = useRef<(() => void) | null>(null);
+  const [autoplayNext, setAutoplayNext] = useState(true);
+  // Set when the browser would only allow playback to start muted.
+  const [autoplayMuted, setAutoplayMuted] = useState(false);
 
   useEffect(() => {
     const fetchMedia = async () => {
@@ -253,6 +262,8 @@ export default function WatchPageClient({ id }: { id: string }) {
       const progress = Math.floor(video.currentTime);
       lastTrackedProgressRef.current = progress;
       sendTrackingEvent(progress, true);
+      // Roll on to the next episode, when there is one and autoplay is on.
+      autoAdvanceRef.current?.();
     };
 
     video.addEventListener("play", handlePlay);
@@ -287,25 +298,86 @@ export default function WatchPageClient({ id }: { id: string }) {
     };
   }, []);
 
+  /**
+   * Starts playback without waiting for a click. Browsers refuse an unattended
+   * play with sound, so fall back to muted rather than leaving the viewer on a
+   * poster frame — the overlay then offers to turn the sound back on.
+   */
+  const startPlayback = useCallback(async () => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    try {
+      await video.play();
+      setAutoplayMuted(false);
+    } catch {
+      try {
+        video.muted = true;
+        await video.play();
+        setAutoplayMuted(true);
+      } catch {
+        // Refused outright (some mobile data-saver modes) — the viewer presses
+        // play themselves.
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const attempt = () => {
+      void startPlayback();
+    };
+
+    // `loadeddata` fires for a plain src and for an attached HLS stream alike.
+    video.addEventListener("loadeddata", attempt);
+    if (video.readyState >= 2) attempt();
+
+    return () => video.removeEventListener("loadeddata", attempt);
+  }, [startPlayback, currentVideoUrl, isHlsActive]);
+
+  const unmute = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = false;
+    setAutoplayMuted(false);
+    void video.play().catch(() => undefined);
+  };
+
   const handleEpisodeSelect = (episodeId: string) => {
     router.push(`/watch/${episodeId}`);
   };
 
+  // The URL carries the media id — every link to an episode points at
+  // `episode.mediaId` — so that, not the episode's own id, is what locates the
+  // episode being watched. Matching on `id` left this at -1, which disabled
+  // Previous and made Next jump to the first episode.
   const currentEpisodeIndex = episodes.findIndex(
-    (ep) => ep.id === currentEpisodeId
+    (ep) => ep.mediaId === currentEpisodeId || ep.id === currentEpisodeId
   );
 
+  const previousEpisode =
+    currentEpisodeIndex > 0 ? episodes[currentEpisodeIndex - 1] : null;
+  const nextEpisode =
+    currentEpisodeIndex >= 0 && currentEpisodeIndex < episodes.length - 1
+      ? episodes[currentEpisodeIndex + 1]
+      : null;
+
   const handlePrevious = () => {
-    if (currentEpisodeIndex > 0) {
-      router.push(`/watch/${episodes[currentEpisodeIndex - 1].mediaId}`);
-    }
+    if (previousEpisode) router.push(`/watch/${previousEpisode.mediaId}`);
   };
 
   const handleNext = () => {
-    if (currentEpisodeIndex < episodes.length - 1) {
-      router.push(`/watch/${episodes[currentEpisodeIndex + 1].mediaId}`);
-    }
+    if (nextEpisode) router.push(`/watch/${nextEpisode.mediaId}`);
   };
+
+  useEffect(() => {
+    autoAdvanceRef.current =
+      autoplayNext && nextEpisode
+        ? () => router.push(`/watch/${nextEpisode.mediaId}`)
+        : null;
+  }, [autoplayNext, nextEpisode, router]);
 
   const handleQualityChange = (newUrl: string) => {
     if (!videoRef.current || currentVideoUrl === newUrl) {
@@ -477,6 +549,16 @@ export default function WatchPageClient({ id }: { id: string }) {
                   >
                     Your browser does not support the video tag.
                   </video>
+                  {autoplayMuted && (
+                    <Button
+                      size="sm"
+                      onClick={unmute}
+                      className="absolute top-4 left-4 bg-black/70 hover:bg-black/85 text-white"
+                    >
+                      <VolumeX className="w-4 h-4 mr-2" />
+                      Tap to unmute
+                    </Button>
+                  )}
                   {/* Quality Selector */}
                   {media.videoSources && media.videoSources.length > 0 && !isHlsActive && (
                     <div
@@ -528,22 +610,42 @@ export default function WatchPageClient({ id }: { id: string }) {
 
               {/* Next/Prev buttons for series */}
               {media.type === "series" && episodes.length > 0 && (
-                <div className="flex justify-between items-center mb-8">
+                <div className="flex flex-wrap justify-between items-center gap-3 mb-8">
                   <Button
                     variant="outline"
                     onClick={handlePrevious}
-                    disabled={currentEpisodeIndex <= 0}
+                    disabled={!previousEpisode}
+                    title={previousEpisode?.title}
                   >
                     <SkipBack className="w-4 h-4 mr-2" />
                     Previous Episode
                   </Button>
-                  <div className="text-sm text-muted-foreground">
-                    Episode {currentEpisodeIndex + 1} of {episodes.length}
+                  <div className="flex flex-col items-center gap-1">
+                    <div className="text-sm text-muted-foreground">
+                      {currentEpisodeIndex >= 0
+                        ? `Episode ${currentEpisodeIndex + 1} of ${episodes.length}`
+                        : `${episodes.length} episodes`}
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => setAutoplayNext((on) => !on)}
+                      aria-pressed={autoplayNext}
+                    >
+                      {autoplayNext ? (
+                        <PlayCircle className="w-3.5 h-3.5 mr-1.5 text-primary" />
+                      ) : (
+                        <PauseCircle className="w-3.5 h-3.5 mr-1.5" />
+                      )}
+                      Autoplay next: {autoplayNext ? "On" : "Off"}
+                    </Button>
                   </div>
                   <Button
                     variant="outline"
                     onClick={handleNext}
-                    disabled={currentEpisodeIndex >= episodes.length - 1}
+                    disabled={!nextEpisode}
+                    title={nextEpisode?.title}
                   >
                     Next Episode
                     <SkipForward className="w-4 h-4 ml-2" />

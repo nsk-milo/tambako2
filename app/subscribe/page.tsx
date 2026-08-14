@@ -16,21 +16,59 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { motion, AnimatePresence, Variants } from "framer-motion"
-import { Prisma } from "@/lib/generated/prisma"
 import { useCurrentUser } from "@/hooks/use-current-user"
 import { Loader2, CheckCircle, AlertCircle, Check } from "lucide-react"
 import axios from "axios"
 import { useEffect, useState } from "react"
 
-interface SubscriptionPlan {
+interface PlanFromServer {
   subscription_id: number
-  name: string
-  description: string
-  cost: Prisma.Decimal
   type: string
+  description: string | null
+  cost: string
+  billing_cycle: "daily" | "weekly" | "monthly"
+  duration_count: number
+  duration_days: number
+  period_label: string
+  price_suffix: string
+  is_active: boolean
+  /** Only set on upgrade options: what the unused days are worth. */
+  credit?: number
+  /** Only set on upgrade options: the prorated price of moving up now. */
+  amount_due?: number
+}
+
+interface SubscriptionPlan extends PlanFromServer {
   features: string[]
   popular?: boolean
 }
+
+/** The plan the customer is on, when they came here to upgrade. */
+interface CurrentPlan {
+  subscription_id: number
+  type: string
+  cost: string
+  period_label: string
+  end_date: string
+  days_remaining: number
+}
+
+const FEATURES_BY_CYCLE: Record<PlanFromServer["billing_cycle"], string[]> = {
+  monthly: ["All Content in 4K", "Watch on 4 devices", "Download for offline viewing", "No Ads"],
+  weekly: ["All Content in HD", "Watch on 2 devices", "Download for offline viewing"],
+  daily: ["All Content in SD", "Watch on 1 device"],
+}
+
+/** Adds the marketing copy the plan rows do not carry. */
+const decoratePlan = (plan: PlanFromServer): SubscriptionPlan => ({
+  ...plan,
+  popular: plan.billing_cycle === "monthly",
+  features: FEATURES_BY_CYCLE[plan.billing_cycle] ?? FEATURES_BY_CYCLE.daily,
+})
+
+/** What this plan costs right now — the upgrade price when there is one. */
+const payableAmount = (plan: SubscriptionPlan) =>
+  plan.amount_due !== undefined ? plan.amount_due : Number(plan.cost)
 
 // Mobile money networks Flutterwave settles ZMW through, and the prefixes that
 // identify them, so the right one is preselected as the customer types.
@@ -104,6 +142,11 @@ export default function SubscribePage() {
   const currentUser = useCurrentUser()
   const [plans, setPlans] = useState<SubscriptionPlan[]>([])
   const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan | null>(null)
+  // Set when the customer arrived from "Upgrade Plan" on their profile.
+  const [upgradeMode, setUpgradeMode] = useState(false)
+  const [currentPlan, setCurrentPlan] = useState<CurrentPlan | null>(null)
+  const [upgradeUnavailable, setUpgradeUnavailable] = useState<string | null>(null)
+  const [loadingPlans, setLoadingPlans] = useState(true)
   const [phoneNumber, setPhoneNumber] = useState("")
   const [fullName, setFullName] = useState("")
   const [network, setNetwork] = useState<Network>("MTN")
@@ -120,35 +163,52 @@ export default function SubscribePage() {
   } | null>(null)
 
   useEffect(() => {
-    const fetchPlans = async () => {
-      try {
-        const response = await axios.get<Omit<SubscriptionPlan, "features" | "popular">[]>("/api/subscriptions")
-        const plansFromServer = response.data || []
+    // Read straight off the URL rather than through useSearchParams, which
+    // would force this page behind a Suspense boundary.
+    const wantsUpgrade = new URLSearchParams(window.location.search).get("upgrade") === "1"
 
-        const enhancedData = plansFromServer.map((plan) => {
-          if (plan.type === "monthly") {
-            return {
-              ...plan,
-              popular: true,
-              features: ["All Content in 4K", "Watch on 4 devices", "Download for offline viewing", "No Ads"],
-            }
-          }
-          if (plan.type === "weekly") {
-            return {
-              ...plan,
-              features: ["All Content in HD", "Watch on 2 devices", "Download for offline viewing"],
-            }
-          }
-          return {
-            ...plan,
-            features: ["All Content in SD", "Watch on 1 device"],
-          }
-        })
-        setPlans(enhancedData)
+    /**
+     * In upgrade mode the plans come from the upgrade endpoint, which returns
+     * only the plans that are a step up and prices each one after crediting the
+     * days left on the current plan. If there is nothing to upgrade to, fall
+     * back to the ordinary plan list.
+     */
+    const fetchUpgradeOptions = async () => {
+      const { data } = await axios.get<{
+        eligible: boolean
+        current: CurrentPlan | null
+        options: PlanFromServer[]
+      }>("/api/subscriptions/upgrade")
+
+      if (!data.eligible) {
+        setUpgradeUnavailable(
+          data.current
+            ? `You are already on our top plan (${data.current.type}). There is nothing higher to move up to.`
+            : "You do not have a running subscription to upgrade, so these are our normal prices."
+        )
+        return false
+      }
+
+      setUpgradeMode(true)
+      setCurrentPlan(data.current)
+      setPlans(data.options.map(decoratePlan))
+      return true
+    }
+
+    const fetchPlans = async () => {
+      const response = await axios.get<PlanFromServer[]>("/api/subscriptions")
+      setPlans((response.data || []).map(decoratePlan))
+    }
+
+    const load = async () => {
+      setLoadingPlans(true)
+      try {
+        if (wantsUpgrade && (await fetchUpgradeOptions())) return
+        await fetchPlans()
       } catch (err) {
         const errorMessage =
           axios.isAxiosError(err) && err.response
-            ? err.response.data.error || "Failed to load subscription plans."
+            ? err.response.data.error || err.response.data.message || "Failed to load subscription plans."
             : err instanceof Error
             ? err.message
             : "An unknown error occurred."
@@ -158,10 +218,12 @@ export default function SubscribePage() {
           description: errorMessage,
           type: "error",
         })
+      } finally {
+        setLoadingPlans(false)
       }
     }
 
-    fetchPlans()
+    load()
   }, [])
 
   useEffect(() => {
@@ -301,6 +363,8 @@ export default function SubscribePage() {
         network,
         phoneNumber,
         fullName,
+        // The server re-prices the upgrade itself; this only asks for it.
+        upgrade: upgradeMode,
       })
 
       if (!data?.reference) {
@@ -330,9 +394,33 @@ export default function SubscribePage() {
     <>
       <div className="container mx-auto px-4">
         <div className="max-w-3xl mx-auto text-center mb-12">
-          <h1 className="text-4xl md:text-5xl font-bold mb-4">Choose Your Plan</h1>
-          <p className="text-lg text-muted-foreground">Unlock unlimited streaming. Cancel anytime.</p>
+          <h1 className="text-4xl md:text-5xl font-bold mb-4">
+            {upgradeMode ? "Upgrade Your Plan" : "Choose Your Plan"}
+          </h1>
+          <p className="text-lg text-muted-foreground">
+            {upgradeMode
+              ? "Move up now — we take the days left on your current plan off the price."
+              : "Unlock unlimited streaming. Cancel anytime."}
+          </p>
+          {upgradeMode && currentPlan && (
+            <p className="mt-4 inline-block rounded-lg border border-primary/40 bg-primary/10 px-4 py-2 text-sm">
+              You are on <span className="font-semibold">{currentPlan.type}</span> with{" "}
+              {currentPlan.days_remaining} day{currentPlan.days_remaining === 1 ? "" : "s"} left,
+              until {new Date(currentPlan.end_date).toLocaleDateString()}.
+            </p>
+          )}
+          {upgradeUnavailable && (
+            <p className="mt-4 inline-block rounded-lg border border-white/10 bg-background/40 px-4 py-2 text-sm text-muted-foreground">
+              {upgradeUnavailable}
+            </p>
+          )}
         </div>
+
+        {loadingPlans && (
+          <div className="flex justify-center py-12">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          </div>
+        )}
 
         {plans.length > 0 && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-12">
@@ -358,14 +446,29 @@ export default function SubscribePage() {
                     </div>
                   )}
                   <CardHeader>
-                    <CardTitle className="text-foreground">{plan.name}</CardTitle>
-                    <CardDescription className="text-foreground/80">{plan.description}</CardDescription>
+                    <CardTitle className="text-foreground capitalize">{plan.type}</CardTitle>
+                    <CardDescription className="text-foreground/80">
+                      {plan.description || `${plan.period_label} of unlimited streaming`}
+                    </CardDescription>
                   </CardHeader>
                   <CardContent className="flex-grow">
-                    <p className="text-4xl font-bold mb-6">
-                      K{Number(plan.cost).toFixed(2)}
-                      <span className="text-base font-normal text-foreground/80">/{plan.type}</span>
+                    <p className="text-4xl font-bold mb-1">
+                      K{payableAmount(plan).toFixed(2)}
+                      {!upgradeMode && (
+                        <span className="text-base font-normal text-foreground/80">
+                          /{plan.price_suffix}
+                        </span>
+                      )}
                     </p>
+                    {upgradeMode ? (
+                      <p className="mb-6 text-sm text-foreground/80">
+                        <span className="line-through">K{Number(plan.cost).toFixed(2)}</span>{" "}
+                        after a K{(plan.credit ?? 0).toFixed(2)} credit — then {plan.period_label}{" "}
+                        from today.
+                      </p>
+                    ) : (
+                      <p className="mb-6 text-sm text-foreground/80">{plan.period_label} of access</p>
+                    )}
                     <ul className="space-y-2 text-sm text-foreground/80">
                       {plan.features.map((feature, i) => (
                         <li key={i} className="flex items-center">
@@ -393,9 +496,20 @@ export default function SubscribePage() {
               <Card className="bg-background/30 backdrop-blur-lg border border-white/10">
                 <motion.div variants={formItemVariants}>
                   <CardHeader>
-                    <CardTitle>Complete Your Payment</CardTitle>
+                    <CardTitle>{upgradeMode ? "Complete Your Upgrade" : "Complete Your Payment"}</CardTitle>
                     <CardDescription className="text-foreground/80">
-                      You have selected the <span className="font-semibold text-primary">{selectedPlan.name}</span> plan.
+                      You have selected the{" "}
+                      <span className="font-semibold text-primary capitalize">{selectedPlan.type}</span> plan
+                      {upgradeMode && selectedPlan.credit !== undefined ? (
+                        <>
+                          {" "}— K{Number(selectedPlan.cost).toFixed(2)} less a K
+                          {selectedPlan.credit.toFixed(2)} credit for the days left on your current
+                          plan. It replaces your current plan today and runs for{" "}
+                          {selectedPlan.period_label}.
+                        </>
+                      ) : (
+                        <>, which gives you {selectedPlan.period_label} of access.</>
+                      )}
                     </CardDescription>
                   </CardHeader>
                 </motion.div>
@@ -438,7 +552,7 @@ export default function SubscribePage() {
                     )}
                     <motion.div variants={formItemVariants}>
                       <Button type="submit" className="w-full" disabled={loading || !!awaitingApproval}>
-                        {(loading || !!awaitingApproval) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Pay K{Number(selectedPlan.cost).toFixed(2)}
+                        {(loading || !!awaitingApproval) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Pay K{payableAmount(selectedPlan).toFixed(2)}
                       </Button>
                     </motion.div>
                   </form>

@@ -15,6 +15,7 @@ type ContentItem = {
   title: string;
   duration: number | null;
   totalViews: number;
+  monthlyViews?: number;
   uniqueViews: number;
   minutesConsumed: number;
   revenueEarned: number;
@@ -28,6 +29,9 @@ type ProviderAnalyticsResponse = {
     providerMonthlyMinutes: number;
     providerShareTotal: number;
     providerShareMonthly: number;
+    totalViews?: number;
+    monthlyViews?: number;
+    viewPayoutRate?: number;
   };
   message?: string;
   error?: string;
@@ -111,7 +115,9 @@ export default function ContentProvider() {
     (sum, item) => sum + (item.monthlyEarnings ?? item.revenueEarned),
     0
   );
+  const totalEarnings = contentItems.reduce((sum, item) => sum + item.revenueEarned, 0);
   const totalViews = contentItems.reduce((sum, item) => sum + item.totalViews, 0);
+  const monthlyViews = contentItems.reduce((sum, item) => sum + (item.monthlyViews ?? 0), 0);
   const totalUniqueViews = contentItems.reduce((sum, item) => sum + item.uniqueViews, 0);
   const totalMinutesConsumed = contentItems.reduce((sum, item) => sum + item.minutesConsumed, 0);
 
@@ -124,6 +130,13 @@ export default function ContentProvider() {
           <div className="mb-8">
             <h1 className="text-4xl font-bold mb-2">Content Provider Dashboard</h1>
             <p className="text-muted-foreground">Monitor your content performance and earnings</p>
+            <p className="text-sm text-muted-foreground mt-2">
+              You earn <span className="font-semibold text-foreground">K0.08</span> per view. A view
+              counts when someone watches at least{" "}
+              <span className="font-semibold text-foreground">2 minutes</span> of a music title or{" "}
+              <span className="font-semibold text-foreground">8 minutes</span> of a movie or
+              episode — once per viewer, per title, per month.
+            </p>
           </div>
 
           {/* Monthly Earnings Summary */}
@@ -134,17 +147,21 @@ export default function ContentProvider() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold">K{totalMonthlyRevenue.toFixed(2)}</div>
-                <p className="text-xs text-muted-foreground mt-1">Your 50% share this month</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {monthlyViews.toLocaleString()} paid view{monthlyViews === 1 ? "" : "s"} this month
+                </p>
               </CardContent>
             </Card>
 
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-base text-muted-foreground">Total Views</CardTitle>
+                <CardTitle className="text-base text-muted-foreground">Total Earned</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-3xl font-bold">{totalViews.toLocaleString()}</div>
-                <p className="text-xs text-muted-foreground mt-1">Across all content</p>
+                <div className="text-3xl font-bold">K{totalEarnings.toFixed(2)}</div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {totalViews.toLocaleString()} paid view{totalViews === 1 ? "" : "s"} all time
+                </p>
               </CardContent>
             </Card>
 

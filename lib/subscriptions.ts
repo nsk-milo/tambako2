@@ -1,26 +1,6 @@
 import { Prisma } from "@/lib/generated/prisma";
 import { prisma } from "@/lib/prisma";
-
-/** Adds one plan period to `from`, based on the plan's `type` column. */
-export function periodEndDate(planType: string, from: Date) {
-  const end = new Date(from);
-  switch (planType.trim().toLowerCase()) {
-    case "daily":
-    case "dialy": // legacy spelling present in seeded data
-      end.setDate(end.getDate() + 1);
-      break;
-    case "weekly":
-      end.setDate(end.getDate() + 7);
-      break;
-    case "monthly":
-      end.setMonth(end.getMonth() + 1);
-      break;
-    default:
-      end.setDate(end.getDate() + 1);
-      break;
-  }
-  return end;
-}
+import { periodEndDate } from "@/lib/plans";
 
 /**
  * Marks a payment successful and grants the subscription it paid for, in one
@@ -69,9 +49,13 @@ export async function activatePaidSubscription({
 
     const now = new Date();
     // Stack a renewal on top of the remaining time instead of discarding it.
+    // An upgrade does not stack: the customer was credited for the days they
+    // had left when the charge was priced, so the new plan starts now.
     const startDate =
-      activeSubscription && activeSubscription.end_date > now ? activeSubscription.end_date : now;
-    const endDate = periodEndDate(payment.subscriptions.type, startDate);
+      !payment.is_upgrade && activeSubscription && activeSubscription.end_date > now
+        ? activeSubscription.end_date
+        : now;
+    const endDate = periodEndDate(payment.subscriptions, startDate);
 
     await tx.user_subscriptions.updateMany({
       where: { user_id: payment.user_id, is_active: true },

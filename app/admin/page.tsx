@@ -146,7 +146,68 @@ interface ActivityLogItem {
 interface Plan {
   subscription_id: number;
   type: string;
+  description: string | null;
   cost: string;
+  billing_cycle: BillingCycle;
+  duration_count: number;
+  duration_days: number;
+  period_label: string;
+  price_suffix: string;
+  is_active: boolean;
+}
+
+type BillingCycle = "daily" | "weekly" | "monthly";
+
+/** What the plan dialog collects, before the server normalises it. */
+interface PlanForm {
+  type: string;
+  description: string;
+  cost: string;
+  billing_cycle: BillingCycle;
+  duration_count: string;
+  is_active: boolean;
+}
+
+const EMPTY_PLAN_FORM: PlanForm = {
+  type: "",
+  description: "",
+  cost: "",
+  billing_cycle: "daily",
+  duration_count: "1",
+  is_active: true,
+};
+
+const CYCLE_UNIT: Record<BillingCycle, string> = {
+  daily: "day",
+  weekly: "week",
+  monthly: "month",
+};
+
+const DAYS_PER_CYCLE: Record<BillingCycle, number> = {
+  daily: 1,
+  weekly: 7,
+  monthly: 30,
+};
+
+/**
+ * Mirrors the server's rule so the admin sees it before saving: anything under
+ * a week is a daily plan, however it was entered.
+ */
+function describePlanPeriod(cycle: BillingCycle, count: string) {
+  const parsed = Number(count);
+  if (!Number.isFinite(parsed) || parsed < 1) return null;
+
+  const whole = Math.floor(parsed);
+  const days = DAYS_PER_CYCLE[cycle] * whole;
+  const effectiveCycle: BillingCycle = days < 7 ? "daily" : cycle;
+  const effectiveCount = days < 7 ? days : whole;
+  const unit = CYCLE_UNIT[effectiveCycle];
+
+  return {
+    cycle: effectiveCycle,
+    text: `${effectiveCount} ${unit}${effectiveCount === 1 ? "" : "s"} of access per payment`,
+    coerced: effectiveCycle !== cycle,
+  };
 }
 
 interface AdminAnalyticsResponse {
@@ -157,6 +218,12 @@ interface AdminAnalyticsResponse {
     adminShareMonthly: number;
     providerShareTotal: number;
     providerShareMonthly: number;
+    /** What creators have actually earned, at K0.08 per qualifying view. */
+    creatorPayoutsTotal: number;
+    creatorPayoutsMonthly: number;
+    qualifyingViewsTotal: number;
+    qualifyingViewsMonthly: number;
+    viewPayoutRate: number;
   };
   userActivity: {
     active: number;
@@ -172,16 +239,20 @@ interface AdminAnalyticsResponse {
     providerName: string | null;
     providerEmail: string | null;
     totalViews: number;
+    monthlyViews: number;
     uniqueViews: number;
     minutesConsumed: number;
     revenueEarned: number;
+    monthlyRevenueEarned: number;
     items: Array<{
       id: string;
       title: string;
       duration: number | null;
       totalViews: number;
+      monthlyViews: number;
       uniqueViews: number;
       minutesConsumed: number;
+      revenueEarned: number;
     }>;
   }>;
 }
@@ -260,16 +331,22 @@ export default function AdminPage() {
   const [supportUsersSortBy, setSupportUsersSortBy] = useState("created_at");
   const [supportUsersSortDir, setSupportUsersSortDir] = useState("desc");
 
-  // State for adding new plan
-  const [showAddPlanDialog, setShowAddPlanDialog] = useState(false);
-  const [newPlanType, setNewPlanType] = useState("");
-  const [newPlanCostInput, setNewPlanCostInput] = useState("");
+  // State for creating and editing plans. The same form backs both dialogs;
+  // `editingPlanId` is what tells them apart.
+  const [showPlanDialog, setShowPlanDialog] = useState(false);
   const [editingPlanId, setEditingPlanId] = useState<number | null>(null);
-  const [newPlanCost, setNewPlanCost] = useState<string>("");
+  const [planForm, setPlanForm] = useState<PlanForm>(EMPTY_PLAN_FORM);
+  const [planFormError, setPlanFormError] = useState<string | null>(null);
+  const [isSavingPlan, setIsSavingPlan] = useState(false);
+  const [planNotice, setPlanNotice] = useState<string | null>(null);
+  const [deletingPlanId, setDeletingPlanId] = useState<number | null>(null);
 
   const fetchPlans = async () => {
     try {
-      const response = await axios.get<Plan[]>("/api/subscriptions");
+      // Retired plans still show here so the admin can bring one back.
+      const response = await axios.get<Plan[]>("/api/subscriptions", {
+        params: { includeInactive: true },
+      });
       setPlans(response.data);
     } catch (error) {
       console.error("Failed to fetch plans:", error);
@@ -363,34 +440,100 @@ export default function AdminPage() {
     }
   };
 
-  const handleUpdatePlan = async (planId: number) => {
-    try {
-      await axios.put("/api/subscriptions", {
-        subscription_id: planId,
-        cost: newPlanCost,
-      });
+  const openNewPlanDialog = () => {
+    setEditingPlanId(null);
+    setPlanForm(EMPTY_PLAN_FORM);
+    setPlanFormError(null);
+    setPlanNotice(null);
+    setShowPlanDialog(true);
+  };
 
+  const openEditPlanDialog = (plan: Plan) => {
+    setEditingPlanId(plan.subscription_id);
+    setPlanForm({
+      type: plan.type,
+      description: plan.description ?? "",
+      cost: plan.cost,
+      billing_cycle: plan.billing_cycle,
+      duration_count: String(plan.duration_count),
+      is_active: plan.is_active,
+    });
+    setPlanFormError(null);
+    setPlanNotice(null);
+    setShowPlanDialog(true);
+  };
+
+  /** Creates or edits, depending on whether a plan is being edited. */
+  const handleSavePlan = async () => {
+    const cost = parseFloat(planForm.cost);
+    const duration = Number(planForm.duration_count);
+
+    if (!planForm.type.trim()) {
+      setPlanFormError("Give the plan a name.");
+      return;
+    }
+    if (!Number.isFinite(cost) || cost < 0) {
+      setPlanFormError("Enter a price of zero or more.");
+      return;
+    }
+    if (!Number.isFinite(duration) || duration < 1) {
+      setPlanFormError("Enter a duration of at least 1.");
+      return;
+    }
+
+    setIsSavingPlan(true);
+    setPlanFormError(null);
+    try {
+      const payload = {
+        type: planForm.type.trim(),
+        description: planForm.description.trim() || null,
+        cost,
+        billing_cycle: planForm.billing_cycle,
+        duration_count: Math.floor(duration),
+        is_active: planForm.is_active,
+      };
+
+      if (editingPlanId === null) {
+        await axios.post("/api/subscriptions", payload);
+      } else {
+        await axios.put("/api/subscriptions", {
+          subscription_id: editingPlanId,
+          ...payload,
+        });
+      }
+
+      setShowPlanDialog(false);
       setEditingPlanId(null);
+      setPlanForm(EMPTY_PLAN_FORM);
       fetchPlans();
     } catch (error) {
-      console.error("Error updating plan:", error);
-      // You could set an error state here to show a message to the user
+      setPlanFormError(
+        axios.isAxiosError(error) && error.response?.data?.error
+          ? error.response.data.error
+          : "Could not save the plan. Please try again."
+      );
+    } finally {
+      setIsSavingPlan(false);
     }
   };
 
-  const handleAddPlanSubmit = async () => {
+  const handleDeletePlan = async (planId: number) => {
+    setDeletingPlanId(planId);
+    setPlanNotice(null);
     try {
-      await axios.post("/api/subscriptions", {
-        type: newPlanType,
-        cost: parseFloat(newPlanCostInput), // Ensure cost is sent as a number
+      const { data } = await axios.delete("/api/subscriptions", {
+        params: { subscription_id: planId },
       });
-
-      setShowAddPlanDialog(false);
-      setNewPlanType("");
-      setNewPlanCostInput("");
-      fetchPlans(); // Refresh the list of plans
+      setPlanNotice(data?.message ?? "Plan deleted.");
+      fetchPlans();
     } catch (error) {
-      console.error("Error adding new plan:", error);
+      setPlanNotice(
+        axios.isAxiosError(error) && error.response?.data?.error
+          ? error.response.data.error
+          : "Could not delete the plan. Please try again."
+      );
+    } finally {
+      setDeletingPlanId(null);
     }
   };
 
@@ -1607,120 +1750,127 @@ export default function AdminPage() {
                         Available Subscription Plans
                       </CardTitle>
                       <CardDescription>
-                        View and manage subscription plans.
+                        Create daily, weekly and monthly plans, set their price
+                        and edit them at any time.
                       </CardDescription>
                     </div>
-                    <AlertDialog
-                      open={showAddPlanDialog}
-                      onOpenChange={setShowAddPlanDialog}
-                    >
-                      <AlertDialogTrigger asChild>
-                        <Button>Add New Plan</Button>
-                      </AlertDialogTrigger>
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>Add New Subscription Plan</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            Enter the details for the new subscription plan.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <div className="space-y-4 py-4">
-                          <div className="space-y-2">
-                            <Label htmlFor="planType">Plan Type</Label>
-                            <Input
-                              id="planType"
-                              placeholder="e.g., Premium, Basic"
-                              value={newPlanType}
-                              onChange={(e) => setNewPlanType(e.target.value)}
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label htmlFor="planCost">Cost (K)</Label>
-                            <Input
-                              id="planCost"
-                              type="number"
-                              step="0.01"
-                              placeholder="e.g., 25.00"
-                              value={newPlanCostInput}
-                              onChange={(e) => setNewPlanCostInput(e.target.value)}
-                            />
-                          </div>
-                        </div>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>Cancel</AlertDialogCancel>
-                          <AlertDialogAction onClick={handleAddPlanSubmit}>
-                            Add Plan
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
+                    <Button onClick={openNewPlanDialog}>Add New Plan</Button>
                   </CardHeader>
-                  <CardContent>
-                    <div className="border rounded-lg overflow-hidden">
-                      <table className="w-full">
+                  <CardContent className="space-y-4">
+                    {planNotice && (
+                      <div className="rounded-lg border border-primary/40 bg-primary/10 p-3 text-sm">
+                        {planNotice}
+                      </div>
+                    )}
+                    <div className="border rounded-lg overflow-x-auto">
+                      <table className="w-full min-w-[720px]">
                         <thead className="bg-muted/30">
                           <tr>
-                            <th className="text-left p-3 font-medium">
-                              Plan Type
-                            </th>
+                            <th className="text-left p-3 font-medium">Plan</th>
+                            <th className="text-left p-3 font-medium">Billing</th>
+                            <th className="text-left p-3 font-medium">Access</th>
                             <th className="text-left p-3 font-medium">Cost</th>
-                            <th className="text-right p-3 font-medium">
-                              Actions
-                            </th>
+                            <th className="text-left p-3 font-medium">Status</th>
+                            <th className="text-right p-3 font-medium">Actions</th>
                           </tr>
                         </thead>
                         <tbody>
+                          {plans.length === 0 && (
+                            <tr>
+                              <td
+                                colSpan={6}
+                                className="p-6 text-center text-muted-foreground"
+                              >
+                                No plans yet. Add one to start selling
+                                subscriptions.
+                              </td>
+                            </tr>
+                          )}
                           {plans.map((plan) => (
                             <tr
                               key={plan.subscription_id}
                               className="border-b hover:bg-muted/20"
                             >
-                              <td className="p-3 font-medium align-middle">
-                                {plan.type}
+                              <td className="p-3 align-middle">
+                                <p className="font-medium">{plan.type}</p>
+                                {plan.description && (
+                                  <p className="text-xs text-muted-foreground">
+                                    {plan.description}
+                                  </p>
+                                )}
+                              </td>
+                              <td className="p-3 align-middle capitalize">
+                                {plan.billing_cycle}
                               </td>
                               <td className="p-3 align-middle">
-                                {editingPlanId === plan.subscription_id ? (
-                                  <Input
-                                    type="number"
-                                    value={newPlanCost}
-                                    onChange={(e) =>
-                                      setNewPlanCost(e.target.value)
-                                    }
-                                    className="w-28"
-                                    autoFocus
-                                  />
-                                ) : (
-                                  `K${plan.cost}`
-                                )}
+                                {plan.period_label}
+                              </td>
+                              <td className="p-3 align-middle">
+                                K{plan.cost}
+                                <span className="text-xs text-muted-foreground">
+                                  {" "}
+                                  /{plan.price_suffix}
+                                </span>
+                              </td>
+                              <td className="p-3 align-middle">
+                                <span
+                                  className={`px-2 py-1 rounded-full text-xs ${
+                                    plan.is_active
+                                      ? "bg-green-500/20 text-green-500"
+                                      : "bg-muted text-muted-foreground"
+                                  }`}
+                                >
+                                  {plan.is_active ? "Offered" : "Retired"}
+                                </span>
                               </td>
                               <td className="p-3">
                                 <div className="flex gap-2 justify-end">
-                                  {editingPlanId === plan.subscription_id ? (
-                                    <>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => openEditPlanDialog(plan)}
+                                  >
+                                    Edit
+                                  </Button>
+                                  <AlertDialog>
+                                    <AlertDialogTrigger asChild>
                                       <Button
                                         size="sm"
-                                        onClick={() =>
-                                          handleUpdatePlan(plan.subscription_id)
+                                        variant="destructive"
+                                        disabled={
+                                          deletingPlanId === plan.subscription_id
                                         }
                                       >
-                                        Save
-                                      </Button>
-                                      <Button
-                                        size="sm"
-                                        variant="ghost"
-                                        onClick={() => setEditingPlanId(null)}
-                                      >
-                                        Cancel
-                                      </Button>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Button size="sm" variant="outline" onClick={() => { setEditingPlanId(plan.subscription_id); setNewPlanCost(plan.cost.toString()); }}>Edit</Button>
-                                      <Button size="sm" variant="destructive" disabled>
                                         Delete
                                       </Button>
-                                    </>
-                                  )}
+                                    </AlertDialogTrigger>
+                                    <AlertDialogContent>
+                                      <AlertDialogHeader>
+                                        <AlertDialogTitle>
+                                          Delete “{plan.type}”?
+                                        </AlertDialogTitle>
+                                        <AlertDialogDescription>
+                                          If anyone has ever subscribed to or
+                                          paid for this plan it will be retired
+                                          instead of deleted, so their history
+                                          stays intact. Either way it stops
+                                          being offered to customers.
+                                        </AlertDialogDescription>
+                                      </AlertDialogHeader>
+                                      <AlertDialogFooter>
+                                        <AlertDialogCancel>
+                                          Keep Plan
+                                        </AlertDialogCancel>
+                                        <AlertDialogAction
+                                          onClick={() =>
+                                            handleDeletePlan(plan.subscription_id)
+                                          }
+                                        >
+                                          Delete Plan
+                                        </AlertDialogAction>
+                                      </AlertDialogFooter>
+                                    </AlertDialogContent>
+                                  </AlertDialog>
                                 </div>
                               </td>
                             </tr>
@@ -1729,6 +1879,168 @@ export default function AdminPage() {
                       </table>
                     </div>
                   </CardContent>
+
+                  <AlertDialog
+                    open={showPlanDialog}
+                    onOpenChange={(open) => {
+                      setShowPlanDialog(open);
+                      if (!open) {
+                        setEditingPlanId(null);
+                        setPlanFormError(null);
+                      }
+                    }}
+                  >
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>
+                          {editingPlanId === null
+                            ? "Add New Subscription Plan"
+                            : "Edit Subscription Plan"}
+                        </AlertDialogTitle>
+                        <AlertDialogDescription>
+                          Pick how the plan bills, how long one payment lasts and
+                          what it costs.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <div className="space-y-4 py-4">
+                        {planFormError && (
+                          <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+                            {planFormError}
+                          </div>
+                        )}
+                        <div className="space-y-2">
+                          <Label htmlFor="planType">Plan Name</Label>
+                          <Input
+                            id="planType"
+                            maxLength={20}
+                            placeholder="e.g., Monthly, 3-Day Pass"
+                            value={planForm.type}
+                            onChange={(e) =>
+                              setPlanForm((form) => ({
+                                ...form,
+                                type: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <Label htmlFor="planCycle">Billing Cycle</Label>
+                            <Select
+                              value={planForm.billing_cycle}
+                              onValueChange={(value) =>
+                                setPlanForm((form) => ({
+                                  ...form,
+                                  billing_cycle: value as BillingCycle,
+                                }))
+                              }
+                            >
+                              <SelectTrigger id="planCycle">
+                                <SelectValue placeholder="Select a cycle" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="daily">Daily</SelectItem>
+                                <SelectItem value="weekly">Weekly</SelectItem>
+                                <SelectItem value="monthly">Monthly</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="planDuration">
+                              Duration ({CYCLE_UNIT[planForm.billing_cycle]}s)
+                            </Label>
+                            <Input
+                              id="planDuration"
+                              type="number"
+                              min="1"
+                              step="1"
+                              value={planForm.duration_count}
+                              onChange={(e) =>
+                                setPlanForm((form) => ({
+                                  ...form,
+                                  duration_count: e.target.value,
+                                }))
+                              }
+                            />
+                          </div>
+                        </div>
+                        {(() => {
+                          const period = describePlanPeriod(
+                            planForm.billing_cycle,
+                            planForm.duration_count
+                          );
+                          if (!period) return null;
+                          return (
+                            <p className="text-xs text-muted-foreground">
+                              {period.text}
+                              {period.coerced &&
+                                " — under a week, so this is billed as a daily plan."}
+                            </p>
+                          );
+                        })()}
+                        <div className="space-y-2">
+                          <Label htmlFor="planCost">Cost (K)</Label>
+                          <Input
+                            id="planCost"
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            placeholder="e.g., 25.00"
+                            value={planForm.cost}
+                            onChange={(e) =>
+                              setPlanForm((form) => ({
+                                ...form,
+                                cost: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="planDescription">
+                            Description (optional)
+                          </Label>
+                          <Textarea
+                            id="planDescription"
+                            maxLength={255}
+                            placeholder="Shown to customers on the plan card."
+                            value={planForm.description}
+                            onChange={(e) =>
+                              setPlanForm((form) => ({
+                                ...form,
+                                description: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4"
+                            checked={planForm.is_active}
+                            onChange={(e) =>
+                              setPlanForm((form) => ({
+                                ...form,
+                                is_active: e.target.checked,
+                              }))
+                            }
+                          />
+                          Offer this plan to customers
+                        </label>
+                      </div>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel disabled={isSavingPlan}>
+                          Cancel
+                        </AlertDialogCancel>
+                        <Button onClick={handleSavePlan} disabled={isSavingPlan}>
+                          {isSavingPlan
+                            ? "Saving…"
+                            : editingPlanId === null
+                            ? "Add Plan"
+                            : "Save Changes"}
+                        </Button>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
                 </Card>
               )}
 
@@ -1822,18 +2134,20 @@ export default function AdminPage() {
                           <div className="flex items-center gap-2">
                             <BarChart3 className="h-4 w-4 text-primary" />
                             <span className="text-sm font-medium">
-                              Provider Share
+                              Creator Payouts
                             </span>
                           </div>
                           <p className="text-3xl font-bold mt-2 text-right h-9 flex justify-end items-center">
                             {isLoadingAdminAnalytics ? (
                               <span className="h-full w-24 animate-pulse rounded-md bg-muted/50" />
                             ) : (
-                              `K${(revenueStats?.providerShareTotal ?? 0).toFixed(2)}`
+                              `K${(revenueStats?.creatorPayoutsTotal ?? 0).toFixed(2)}`
                             )}
                           </p>
                           <p className="text-xs text-muted-foreground text-right mt-1">
-                            50% allocated to creators
+                            {(revenueStats?.qualifyingViewsTotal ?? 0).toLocaleString()} paid views @
+                            K{(revenueStats?.viewPayoutRate ?? 0.08).toFixed(2)} — K
+                            {(revenueStats?.creatorPayoutsMonthly ?? 0).toFixed(2)} this month
                           </p>
                         </CardContent>
                       </Card>
@@ -1950,17 +2264,24 @@ export default function AdminPage() {
                                     </p>
                                   </div>
                                   <div className="text-right">
-                                    <p className="text-sm text-muted-foreground">Revenue Share</p>
+                                    <p className="text-sm text-muted-foreground">Earned</p>
                                     <p className="text-xl font-semibold text-primary">K{provider.revenueEarned.toFixed(2)}</p>
+                                    <p className="text-xs text-muted-foreground">
+                                      K{provider.monthlyRevenueEarned.toFixed(2)} this month
+                                    </p>
                                   </div>
                                 </div>
-                                <div className="mt-4 grid gap-3 text-sm md:grid-cols-3">
+                                <div className="mt-4 grid gap-3 text-sm md:grid-cols-4">
                                   <div>
-                                    <p className="text-muted-foreground">Total Views</p>
+                                    <p className="text-muted-foreground">Paid Views</p>
                                     <p className="font-semibold">{provider.totalViews.toLocaleString()}</p>
                                   </div>
                                   <div>
-                                    <p className="text-muted-foreground">Unique Views</p>
+                                    <p className="text-muted-foreground">This Month</p>
+                                    <p className="font-semibold">{provider.monthlyViews.toLocaleString()}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-muted-foreground">Unique Viewers</p>
                                     <p className="font-semibold">{provider.uniqueViews.toLocaleString()}</p>
                                   </div>
                                   <div>
@@ -1979,9 +2300,11 @@ export default function AdminPage() {
                                             <p className="text-xs text-muted-foreground">Duration: {item.duration ?? 0} mins</p>
                                           </div>
                                           <div className="flex gap-4 text-xs text-muted-foreground">
-                                            <span>Views: {item.totalViews}</span>
+                                            <span>Paid views: {item.totalViews}</span>
+                                            <span>This month: {item.monthlyViews}</span>
                                             <span>Unique: {item.uniqueViews}</span>
                                             <span>Minutes: {item.minutesConsumed.toFixed(2)}</span>
+                                            <span>Earned: K{item.revenueEarned.toFixed(2)}</span>
                                           </div>
                                         </div>
                                       ))}

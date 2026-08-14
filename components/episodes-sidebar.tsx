@@ -17,6 +17,10 @@ interface Episode {
 
 interface EpisodesSidebarProps {
   seriesId: string
+  /**
+   * The media id in the URL — what every episode link points at. Episodes are
+   * matched on `mediaId` for that reason, with their own id accepted too.
+   */
   currentEpisodeId?: string
   onEpisodeSelect: (episodeId: string) => void
 }
@@ -57,7 +61,9 @@ export function EpisodesSidebar({ seriesId, currentEpisodeId, onEpisodeSelect }:
           <div
             key={episode.id}
             className={`group cursor-pointer rounded-lg border border-white/5 p-3 transition-colors hover:bg-white/10 ${
-              currentEpisodeId === episode.id ? "bg-primary/20 border-primary/50" : ""
+              currentEpisodeId === episode.mediaId || currentEpisodeId === episode.id
+                ? "bg-primary/20 border-primary/50"
+                : ""
             }`}
             onClick={() => onEpisodeSelect(episode.mediaId)}
           >

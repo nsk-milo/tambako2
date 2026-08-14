@@ -1,5 +1,6 @@
 import { PrismaClient } from "@/lib/generated/prisma";
 import { NextRequest, NextResponse } from "next/server";
+import { planPeriodLabel } from "@/lib/plans";
 
 const prisma = new PrismaClient();
 
@@ -24,6 +25,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           select: {
             cost: true,
             type: true,
+            billing_cycle: true,
+            duration_count: true,
           },
         },
       },
@@ -47,6 +50,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       subscriptions: {
         cost: latestSubscription.subscriptions?.cost?.toString(),
         type: latestSubscription.subscriptions?.type,
+        period_label: latestSubscription.subscriptions
+          ? planPeriodLabel(latestSubscription.subscriptions)
+          : null,
       },
     };
 

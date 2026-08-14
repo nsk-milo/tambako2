@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { PrismaClient } from "@/lib/generated/prisma";
 import { getUserDataFromToken } from "@/lib/auth";
+import { recordQualifyingView } from "@/lib/views";
 
 const prisma = new PrismaClient();
 
@@ -46,7 +47,20 @@ export async function POST(request: Request) {
       });
     }
 
-    return NextResponse.json({ status: "tracked" });
+    // Pay the creator once this viewer has watched enough of the title, and
+    // only for their first such watch this month.
+    const view = await recordQualifyingView(prisma, {
+      userId: BigInt(user.userId),
+      mediaId: BigInt(mediaId),
+      secondsWatched: Math.max(progressSeconds, 0),
+    });
+
+    return NextResponse.json({
+      status: "tracked",
+      viewQualified: view.qualified,
+      viewCounted: view.counted,
+      viewThresholdSeconds: view.thresholdSeconds,
+    });
   } catch (error) {
     console.error("Track analytics error:", error);
     return NextResponse.json({ error: "Failed to track view." }, { status: 500 });
