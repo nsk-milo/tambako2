@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { PrismaClient } from "@/lib/generated/prisma";
 import bcrypt from "bcrypt";
+import { requireAdmin } from "@/lib/auth";
 
 const prisma = new PrismaClient();
 
@@ -11,6 +12,13 @@ const generateTempPassword = () => {
 
 export async function POST(request: Request) {
   try {
+    // Handing out a password for someone else's account is admin-only. The
+    // admin UI is guarded on the client, which stops nothing for a direct call.
+    const admin = await requireAdmin();
+    if (!admin) {
+      return NextResponse.json({ error: "Admin access required" }, { status: 403 });
+    }
+
     const { userId } = await request.json();
 
     if (!userId) {

@@ -46,3 +46,13 @@ export const getUserDataFromToken = async (): Promise<UserPayload | null> => {
     return null
   }
 }
+
+/**
+ * The caller's token, but only when it belongs to an admin. Routes that can
+ * change another account's access or password must gate on this — the admin UI
+ * is guarded on the client, which stops nothing for a direct API call.
+ */
+export const requireAdmin = async (): Promise<UserPayload | null> => {
+  const user = await getUserDataFromToken()
+  return user?.role === "ADMIN" ? user : null
+}

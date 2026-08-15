@@ -82,13 +82,62 @@ interface Subscription {
   user_subscription_id: string;
   users: { name: string | null,email: string | null,phone_number: string | null };
   user_id: string;
-  is_active: boolean;
+  is_active: boolean | null;
   start_date: string;
   end_date: string;
   subscriptions: {
     cost: string;
     type: string;
   };
+}
+
+/** What the View dialog shows — GET /api/admin/user_subscriptions/[id]. */
+interface SubscriptionDetail {
+  user_subscription_id: string;
+  user_id: string;
+  subscription_id: number;
+  is_active: boolean | null;
+  start_date: string | null;
+  end_date: string | null;
+  created_at: string | null;
+  days_remaining: number;
+  user: {
+    name: string | null;
+    email: string | null;
+    phone_number: string | null;
+    role: string | null;
+    joined_at: string | null;
+  };
+  plan: {
+    subscription_id: number;
+    type: string;
+    cost: string;
+    billing_cycle: string;
+    duration_count: number;
+    period_label: string;
+  };
+  transactions: Array<{
+    transaction_id: string;
+    amount: string;
+    created_at: string | null;
+  }>;
+  payments: Array<{
+    payment_id: string;
+    reference: string;
+    amount: string;
+    currency: string;
+    status: string;
+    channel: string | null;
+    network: string | null;
+    created_at: string;
+  }>;
+}
+
+/** What the Edit dialog collects. */
+interface SubscriptionForm {
+  subscription_id: string;
+  end_date: string;
+  is_active: boolean;
 }
 
 interface SupportUser {
@@ -341,6 +390,28 @@ export default function AdminPage() {
   const [planNotice, setPlanNotice] = useState<string | null>(null);
   const [deletingPlanId, setDeletingPlanId] = useState<number | null>(null);
 
+  // View and Edit on a row of the user subscriptions table. Both open on the
+  // same freshly fetched detail, so the dialogs never show a stale row.
+  const [openSubscriptionDialog, setOpenSubscriptionDialog] = useState<
+    "view" | "edit" | null
+  >(null);
+  const [subscriptionDetail, setSubscriptionDetail] =
+    useState<SubscriptionDetail | null>(null);
+  const [isLoadingSubscriptionDetail, setIsLoadingSubscriptionDetail] =
+    useState(false);
+  const [subscriptionDialogError, setSubscriptionDialogError] = useState<
+    string | null
+  >(null);
+  const [subscriptionForm, setSubscriptionForm] = useState<SubscriptionForm>({
+    subscription_id: "",
+    end_date: "",
+    is_active: true,
+  });
+  const [isSavingSubscription, setIsSavingSubscription] = useState(false);
+  const [subscriptionNotice, setSubscriptionNotice] = useState<string | null>(
+    null
+  );
+
   const fetchPlans = async () => {
     try {
       // Retired plans still show here so the admin can bring one back.
@@ -354,6 +425,20 @@ export default function AdminPage() {
     }
   };
 
+  const fetchSubscriptionsAndUsers = async () => {
+    try {
+      const [subsResponse, usersResponse] = await Promise.all([
+        axios.get<Subscription[]>("/api/user_subscriptions"),
+        axios.get<{ count: number }>("/api/users"),
+      ]);
+      setSubscriptions(subsResponse.data);
+      setUserCount(usersResponse.data.count);
+    } catch (error) {
+      console.error("Failed to fetch subscriptions or users:", error);
+      // Handle error appropriately, e.g., set an error state
+    }
+  };
+
   const handleLogout = () => {
     // Cookie-free logout: drop the stored JWT and hard-navigate to login.
     clearToken();
@@ -361,20 +446,6 @@ export default function AdminPage() {
   };
 
   useEffect(() => {
-    const fetchSubscriptionsAndUsers = async () => {
-      try {
-        const [subsResponse, usersResponse] = await Promise.all([
-          axios.get<Subscription[]>("/api/user_subscriptions"),
-          axios.get<{ count: number }>("/api/users"),
-        ]);
-        setSubscriptions(subsResponse.data);
-        setUserCount(usersResponse.data.count);
-      } catch (error) {
-        console.error("Failed to fetch subscriptions or users:", error);
-        // Handle error appropriately, e.g., set an error state
-      }
-    };
-
     const fetchRevenue = async () => {
       setIsLoadingRevenue(true);
       try {
@@ -534,6 +605,92 @@ export default function AdminPage() {
       );
     } finally {
       setDeletingPlanId(null);
+    }
+  };
+
+  /**
+   * Opens View or Edit on a subscriptions table row. The row itself only
+   * carries what the table renders, so the detail is fetched on open — that
+   * also gives the Edit form the plan id it needs to preselect.
+   */
+  const openSubscription = async (
+    row: Subscription,
+    mode: "view" | "edit"
+  ) => {
+    setOpenSubscriptionDialog(mode);
+    setSubscriptionDetail(null);
+    setSubscriptionDialogError(null);
+    setSubscriptionNotice(null);
+    setIsLoadingSubscriptionDetail(true);
+
+    // The plan dropdown needs the full list, which is otherwise only loaded by
+    // the Plans section.
+    if (mode === "edit" && plans.length === 0) {
+      fetchPlans();
+    }
+
+    try {
+      const { data } = await axios.get<SubscriptionDetail>(
+        `/api/admin/user_subscriptions/${row.user_subscription_id}`
+      );
+      setSubscriptionDetail(data);
+      setSubscriptionForm({
+        subscription_id: String(data.subscription_id),
+        end_date: data.end_date ?? "",
+        is_active: data.is_active ?? false,
+      });
+    } catch (error) {
+      setSubscriptionDialogError(
+        axios.isAxiosError(error) && error.response?.data?.error
+          ? error.response.data.error
+          : "Could not load this subscription. Please try again."
+      );
+    } finally {
+      setIsLoadingSubscriptionDetail(false);
+    }
+  };
+
+  const closeSubscriptionDialog = () => {
+    setOpenSubscriptionDialog(null);
+    setSubscriptionDetail(null);
+    setSubscriptionDialogError(null);
+  };
+
+  const handleSaveSubscription = async () => {
+    if (!subscriptionDetail) return;
+
+    setIsSavingSubscription(true);
+    setSubscriptionDialogError(null);
+    try {
+      const { data } = await axios.patch<{
+        message: string;
+        subscription: Subscription;
+      }>(`/api/admin/user_subscriptions/${subscriptionDetail.user_subscription_id}`, {
+        subscription_id: Number(subscriptionForm.subscription_id),
+        end_date: subscriptionForm.end_date,
+        is_active: subscriptionForm.is_active,
+      });
+
+      // Swap the saved row straight into the table instead of refetching the
+      // whole list, then reconcile in the background.
+      setSubscriptions((rows) =>
+        rows.map((row) =>
+          row.user_subscription_id === data.subscription.user_subscription_id
+            ? { ...row, ...data.subscription }
+            : row
+        )
+      );
+      setSubscriptionNotice(data.message);
+      closeSubscriptionDialog();
+      fetchSubscriptionsAndUsers();
+    } catch (error) {
+      setSubscriptionDialogError(
+        axios.isAxiosError(error) && error.response?.data?.error
+          ? error.response.data.error
+          : "Could not save the subscription. Please try again."
+      );
+    } finally {
+      setIsSavingSubscription(false);
     }
   };
 
@@ -1644,6 +1801,11 @@ export default function AdminPage() {
                         <div className="bg-muted/50 px-4 py-3 border-b">
                           <h3 className="font-semibold">All Subscriptions</h3>
                         </div>
+                        {subscriptionNotice && (
+                          <div className="border-b bg-green-500/10 px-4 py-2 text-sm text-green-700 dark:text-green-400">
+                            {subscriptionNotice}
+                          </div>
+                        )}
                         <div className="overflow-x-auto">
                           <table className="w-full">
                             <thead className="bg-muted/30">
@@ -1712,7 +1874,9 @@ export default function AdminPage() {
                                           : "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
                                       }`}
                                     >
-                                      {subscription.is_active}
+                                      {subscription.is_active
+                                        ? "Active"
+                                        : "Inactive"}
                                     </span>
                                   </td>
                                   <td className="p-3">
@@ -1722,10 +1886,22 @@ export default function AdminPage() {
                                   </td>
                                   <td className="p-3">
                                     <div className="flex gap-2">
-                                      <Button size="sm" variant="outline">
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() =>
+                                          openSubscription(subscription, "view")
+                                        }
+                                      >
                                         View
                                       </Button>
-                                      <Button size="sm" variant="outline">
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() =>
+                                          openSubscription(subscription, "edit")
+                                        }
+                                      >
                                         Edit
                                       </Button>
                                     </div>
@@ -1738,6 +1914,238 @@ export default function AdminPage() {
                       </div>
                     </div>
                   </CardContent>
+
+                  <AlertDialog
+                    open={openSubscriptionDialog !== null}
+                    onOpenChange={(open) => {
+                      if (!open) closeSubscriptionDialog();
+                    }}
+                  >
+                    <AlertDialogContent className="max-h-[85vh] overflow-y-auto">
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>
+                          {openSubscriptionDialog === "edit"
+                            ? "Edit Subscription"
+                            : "Subscription Details"}
+                        </AlertDialogTitle>
+                        <AlertDialogDescription>
+                          {openSubscriptionDialog === "edit"
+                            ? "Move the customer to another plan, change when their access ends, or activate and cancel it."
+                            : "The customer, the plan they are on and their recent billing."}
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+
+                      <div className="space-y-4 py-2">
+                        {subscriptionDialogError && (
+                          <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+                            {subscriptionDialogError}
+                          </div>
+                        )}
+
+                        {isLoadingSubscriptionDetail && (
+                          <div className="space-y-2">
+                            <div className="h-4 w-full animate-pulse rounded bg-muted/50" />
+                            <div className="h-4 w-4/6 animate-pulse rounded bg-muted/50" />
+                            <div className="h-4 w-3/6 animate-pulse rounded bg-muted/50" />
+                          </div>
+                        )}
+
+                        {subscriptionDetail && !isLoadingSubscriptionDetail && (
+                          <>
+                            <div className="rounded-md border border-border/60 p-3">
+                              <p className="font-semibold">
+                                {subscriptionDetail.user.name ?? "Unnamed user"}
+                              </p>
+                              <p className="text-sm text-muted-foreground">
+                                {subscriptionDetail.user.email}
+                              </p>
+                              <p className="text-sm text-muted-foreground">
+                                {subscriptionDetail.user.phone_number} •{" "}
+                                {subscriptionDetail.user.role ?? "USER"}
+                              </p>
+                            </div>
+
+                            {openSubscriptionDialog === "view" ? (
+                              <>
+                                <div className="grid grid-cols-2 gap-3 text-sm">
+                                  <div>
+                                    <p className="text-muted-foreground">Plan</p>
+                                    <p className="font-medium">
+                                      {subscriptionDetail.plan.type}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-muted-foreground">Cost</p>
+                                    <p className="font-medium">
+                                      K{subscriptionDetail.plan.cost} /
+                                      {subscriptionDetail.plan.period_label}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-muted-foreground">Status</p>
+                                    <p className="font-medium">
+                                      {subscriptionDetail.is_active
+                                        ? "Active"
+                                        : "Inactive"}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-muted-foreground">
+                                      Days remaining
+                                    </p>
+                                    <p className="font-medium">
+                                      {subscriptionDetail.days_remaining}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-muted-foreground">Started</p>
+                                    <p className="font-medium">
+                                      {subscriptionDetail.start_date ?? "—"}
+                                    </p>
+                                  </div>
+                                  <div>
+                                    <p className="text-muted-foreground">Ends</p>
+                                    <p className="font-medium">
+                                      {subscriptionDetail.end_date ?? "—"}
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <p className="mb-2 text-sm font-semibold">
+                                    Recent payments
+                                  </p>
+                                  {subscriptionDetail.payments.length > 0 ? (
+                                    <div className="space-y-2">
+                                      {subscriptionDetail.payments.map((payment) => (
+                                        <div
+                                          key={payment.payment_id}
+                                          className="flex items-center justify-between rounded-md border border-border/50 p-2 text-sm"
+                                        >
+                                          <div>
+                                            <p className="font-medium">
+                                              {payment.currency} {payment.amount}
+                                            </p>
+                                            <p className="text-xs text-muted-foreground">
+                                              {payment.reference}
+                                              {payment.network
+                                                ? ` • ${payment.network}`
+                                                : ""}
+                                            </p>
+                                          </div>
+                                          <div className="text-right">
+                                            <p className="font-medium capitalize">
+                                              {payment.status}
+                                            </p>
+                                            <p className="text-xs text-muted-foreground">
+                                              {payment.created_at.slice(0, 10)}
+                                            </p>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="text-sm text-muted-foreground">
+                                      No payments recorded.
+                                    </p>
+                                  )}
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="space-y-2">
+                                  <Label htmlFor="subscriptionPlan">Plan</Label>
+                                  <Select
+                                    value={subscriptionForm.subscription_id}
+                                    onValueChange={(value) =>
+                                      setSubscriptionForm((form) => ({
+                                        ...form,
+                                        subscription_id: value,
+                                      }))
+                                    }
+                                  >
+                                    <SelectTrigger id="subscriptionPlan">
+                                      <SelectValue placeholder="Select a plan" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {plans.map((plan) => (
+                                        <SelectItem
+                                          key={plan.subscription_id}
+                                          value={String(plan.subscription_id)}
+                                        >
+                                          {plan.type} — K{plan.cost} /
+                                          {plan.price_suffix}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                  <p className="text-xs text-muted-foreground">
+                                    Currently on {subscriptionDetail.plan.type}.
+                                    Changing the plan does not charge or refund
+                                    the customer.
+                                  </p>
+                                </div>
+
+                                <div className="space-y-2">
+                                  <Label htmlFor="subscriptionEndDate">
+                                    Access ends
+                                  </Label>
+                                  <Input
+                                    id="subscriptionEndDate"
+                                    type="date"
+                                    min={subscriptionDetail.start_date ?? undefined}
+                                    value={subscriptionForm.end_date}
+                                    onChange={(e) =>
+                                      setSubscriptionForm((form) => ({
+                                        ...form,
+                                        end_date: e.target.value,
+                                      }))
+                                    }
+                                  />
+                                  <p className="text-xs text-muted-foreground">
+                                    Started {subscriptionDetail.start_date ?? "—"}.
+                                  </p>
+                                </div>
+
+                                <label className="flex items-center gap-2 text-sm">
+                                  <input
+                                    type="checkbox"
+                                    className="h-4 w-4"
+                                    checked={subscriptionForm.is_active}
+                                    onChange={(e) =>
+                                      setSubscriptionForm((form) => ({
+                                        ...form,
+                                        is_active: e.target.checked,
+                                      }))
+                                    }
+                                  />
+                                  Subscription is active
+                                </label>
+                              </>
+                            )}
+                          </>
+                        )}
+                      </div>
+
+                      <AlertDialogFooter>
+                        <AlertDialogCancel disabled={isSavingSubscription}>
+                          {openSubscriptionDialog === "edit" ? "Cancel" : "Close"}
+                        </AlertDialogCancel>
+                        {openSubscriptionDialog === "edit" && (
+                          <Button
+                            onClick={handleSaveSubscription}
+                            disabled={
+                              isSavingSubscription ||
+                              isLoadingSubscriptionDetail ||
+                              !subscriptionDetail
+                            }
+                          >
+                            {isSavingSubscription ? "Saving…" : "Save Changes"}
+                          </Button>
+                        )}
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
                 </Card>
               )}
 
