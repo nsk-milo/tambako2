@@ -40,8 +40,29 @@ export async function POST(request: Request) {
     const duration = data.get("duration") as string;
     const categoryName = data.get("category") as "movies" | "series" | "music";
 
+    /**
+     * Media files are too large to travel on this request — a proxy in front of
+     * the app rejects a multi-hundred-megabyte body with a 413 before Next.js
+     * ever sees it. The client therefore uploads them in chunks via
+     * `/api/uploads/*` first and sends back the stored URL as `<field>Url`.
+     * Inline files are still accepted so older clients keep working.
+     */
+    const preUploaded = (field: string) => {
+      const value = data.get(`${field}Url`);
+      return typeof value === "string" && value ? value : null;
+    };
+
+    const preUploadedMedia = preUploaded("file");
+    const preUploadedThumbnail = preUploaded("thumbnail");
+    const preUploadedPlaylist = preUploaded("hls_playlist");
+    const preUploadedSegments = data
+      .getAll("hls_segmentUrls")
+      .filter((value): value is string => typeof value === "string" && value.length > 0);
+
     // --- Basic Validation ---
-    if (!file || !thumbnail || !title || !description || !year || !genreName || !duration || !categoryName) {
+    const hasMedia = Boolean(file || preUploadedMedia);
+    const hasThumbnail = Boolean(thumbnail || preUploadedThumbnail);
+    if (!hasMedia || !hasThumbnail || !title || !description || !year || !genreName || !duration || !categoryName) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
@@ -49,20 +70,26 @@ export async function POST(request: Request) {
     const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     const storagePrefix = process.env.UPLOADS_PREFIX || "media";
 
-    // Upload main media file
-    const fileExtension = path.extname(file.name);
-    const fileName = `${uniqueSuffix}${fileExtension}`;
-    const mediaUrl = await firebaseStorageService.uploadFile(
-      file,
-      fileName,
-      file.type || 'application/octet-stream',
-      storagePrefix
-    );
+    // Store the main media file (unless it is already on disk from a chunked upload)
+    const fileExtension = path.extname(file?.name ?? preUploadedMedia ?? "");
+    const mediaUrl =
+      preUploadedMedia ??
+      (await firebaseStorageService.uploadFile(
+        file,
+        `${uniqueSuffix}${fileExtension}`,
+        file.type || 'application/octet-stream',
+        storagePrefix
+      ));
 
     // Upload optional renditions
     const uploadedRenditions: { [key: string]: string } = {};
 
-    const uploadOptionalRendition = async (rendition: File | null, suffix: string) => {
+    const uploadOptionalRendition = async (rendition: File | null, field: string, suffix: string) => {
+      const alreadyUploaded = preUploaded(field);
+      if (alreadyUploaded) {
+        uploadedRenditions[suffix] = alreadyUploaded;
+        return;
+      }
       if (!rendition) return;
       const renditionExtension = path.extname(rendition.name) || fileExtension;
       const renditionName = `${uniqueSuffix}-${suffix}${renditionExtension}`;
@@ -76,15 +103,15 @@ export async function POST(request: Request) {
     };
 
     await Promise.all([
-      uploadOptionalRendition(file1080, "1080p"),
-      uploadOptionalRendition(file720, "720p"),
-      uploadOptionalRendition(file480, "480p"),
-      uploadOptionalRendition(file360, "360p"),
+      uploadOptionalRendition(file1080, "file_1080p", "1080p"),
+      uploadOptionalRendition(file720, "file_720p", "720p"),
+      uploadOptionalRendition(file480, "file_480p", "480p"),
+      uploadOptionalRendition(file360, "file_360p", "360p"),
     ]);
 
     // Upload HLS files if provided
-    let hlsPlaylistUrl: string | undefined;
-    if (hlsPlaylist) {
+    let hlsPlaylistUrl: string | undefined = preUploadedPlaylist ?? undefined;
+    if (!hlsPlaylistUrl && hlsPlaylist) {
       const playlistExtension = path.extname(hlsPlaylist.name) || ".m3u8";
       const playlistName = `${uniqueSuffix}${playlistExtension}`;
       hlsPlaylistUrl = await firebaseStorageService.uploadFile(
@@ -95,7 +122,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const hlsSegmentUrls: string[] = [];
+    const hlsSegmentUrls: string[] = [...preUploadedSegments];
     if (hlsSegments.length) {
       for (const segment of hlsSegments) {
         const segmentName = segment.name || `${uniqueSuffix}-${Math.random().toString(36).slice(2)}.ts`;
@@ -109,15 +136,15 @@ export async function POST(request: Request) {
       }
     }
 
-    // Upload thumbnail
-    const thumbnailExtension = path.extname(thumbnail.name);
-    const thumbnailName = `${uniqueSuffix}${thumbnailExtension}`;
-    const thumbnailUrl = await firebaseStorageService.uploadFile(
-      thumbnail,
-      thumbnailName,
-      thumbnail.type || 'image/jpeg',
-      `${storagePrefix}/thumbnails`
-    );
+    // Store the thumbnail (unless it is already on disk from a chunked upload)
+    const thumbnailUrl =
+      preUploadedThumbnail ??
+      (await firebaseStorageService.uploadFile(
+        thumbnail,
+        `${uniqueSuffix}${path.extname(thumbnail.name)}`,
+        thumbnail.type || 'image/jpeg',
+        `${storagePrefix}/thumbnails`
+      ));
 
     // --- Database Operations ---
     const categoryRecord = await prisma.categories.findFirst({

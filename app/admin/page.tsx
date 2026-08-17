@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import axios from "axios";
 import { clearToken } from "@/lib/http";
+import { uploadAll, type UploadEntry } from "@/lib/upload-client";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -337,6 +338,8 @@ export default function AdminPage() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadingFileName, setUploadingFileName] = useState("");
   const [seriesList, setSeriesList] = useState<
     { name: string; series_id: string }[]
   >([]);
@@ -749,40 +752,58 @@ export default function AdminPage() {
     setIsUploading(true);
     setUploadError(null);
     setUploadSuccess(false);
-
-    const data = new FormData();
-    data.append("title", formData.title);
-    data.append("description", formData.description);
-    data.append("year", formData.year);
-    data.append("genre", formData.genre);
-    data.append("rating", formData.rating);
-    data.append("duration", formData.duration);
-    data.append("category", formData.category);
-    if (formData.file) data.append("file", formData.file);
-    if (formData.thumbnail) data.append("thumbnail", formData.thumbnail);
-    if (formData.file1080) data.append("file_1080p", formData.file1080);
-    if (formData.file720) data.append("file_720p", formData.file720);
-    if (formData.file480) data.append("file_480p", formData.file480);
-    if (formData.file360) data.append("file_360p", formData.file360);
-    if (formData.hlsPlaylist) data.append("hls_playlist", formData.hlsPlaylist);
-    formData.hlsSegments.forEach((segment) =>
-      data.append("hls_segments", segment)
-    );
-
-    if (formData.category === "series") {
-      data.append("episodeNumber", formData.episodeNumber);
-      data.append("season", formData.season);
-      if (formData.newSeriesName) {
-        data.append("newSeriesName", formData.newSeriesName);
-      } else {
-        data.append("seriesId", formData.seriesId);
-      }
-    }
+    setUploadProgress(0);
+    setUploadingFileName("");
 
     try {
-      await axios.post("/api/media/all", data, {
-        headers: { "Content-Type": "multipart/form-data" },
+      // The files go up first, in chunks. Sending a video inline on the
+      // metadata request below gets a 413 from the proxy in front of the app
+      // long before Next.js sees it.
+      const entries: UploadEntry[] = [];
+      if (formData.file) entries.push({ key: "file", file: formData.file, kind: "media" });
+      if (formData.thumbnail) entries.push({ key: "thumbnail", file: formData.thumbnail, kind: "thumbnail" });
+      if (formData.file1080) entries.push({ key: "file_1080p", file: formData.file1080, kind: "media" });
+      if (formData.file720) entries.push({ key: "file_720p", file: formData.file720, kind: "media" });
+      if (formData.file480) entries.push({ key: "file_480p", file: formData.file480, kind: "media" });
+      if (formData.file360) entries.push({ key: "file_360p", file: formData.file360, kind: "media" });
+      if (formData.hlsPlaylist)
+        entries.push({ key: "hls_playlist", file: formData.hlsPlaylist, kind: "hls-playlist" });
+      formData.hlsSegments.forEach((segment, index) =>
+        entries.push({ key: `hls_segment_${index}`, file: segment, kind: "hls-segment" })
+      );
+
+      const uploadedUrls = await uploadAll(entries, (fraction, fileName) => {
+        setUploadProgress(Math.round(fraction * 100));
+        setUploadingFileName(fileName);
       });
+
+      // Only metadata and the stored URLs travel on this request, so it stays
+      // small enough for any proxy.
+      const data = new FormData();
+      data.append("title", formData.title);
+      data.append("description", formData.description);
+      data.append("year", formData.year);
+      data.append("genre", formData.genre);
+      data.append("rating", formData.rating);
+      data.append("duration", formData.duration);
+      data.append("category", formData.category);
+
+      Object.entries(uploadedUrls).forEach(([key, url]) => {
+        if (key.startsWith("hls_segment_")) data.append("hls_segmentUrls", url);
+        else data.append(`${key}Url`, url);
+      });
+
+      if (formData.category === "series") {
+        data.append("episodeNumber", formData.episodeNumber);
+        data.append("season", formData.season);
+        if (formData.newSeriesName) {
+          data.append("newSeriesName", formData.newSeriesName);
+        } else {
+          data.append("seriesId", formData.seriesId);
+        }
+      }
+
+      await axios.post("/api/media/all", data);
 
       setUploadSuccess(true);
       setTimeout(() => {
@@ -818,6 +839,8 @@ export default function AdminPage() {
       }
     } finally {
       setIsUploading(false);
+      setUploadProgress(0);
+      setUploadingFileName("");
     }
   };
 
@@ -1694,6 +1717,20 @@ export default function AdminPage() {
                         </div>
                       </div>
 
+                      {isUploading && (
+                        <div className="space-y-2">
+                          <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                            <div
+                              className="h-full bg-primary transition-all"
+                              style={{ width: `${uploadProgress}%` }}
+                            />
+                          </div>
+                          <p className="text-sm text-muted-foreground">
+                            Uploading {uploadingFileName || "files"}… {uploadProgress}%
+                          </p>
+                        </div>
+                      )}
+
                       <Button
                         type="submit"
                         className="w-full bg-primary hover:bg-primary/90"
@@ -1702,7 +1739,7 @@ export default function AdminPage() {
                         {isUploading ? (
                           <div className="flex items-center gap-2">
                             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                            Uploading...
+                            Uploading… {uploadProgress}%
                           </div>
                         ) : (
                           <div className="flex items-center gap-2">

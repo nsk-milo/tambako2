@@ -49,3 +49,6 @@ next-env.d.ts
 # uploaded media (local runtime data)
 /public/uploads/*
 !/public/uploads/.gitkeep
+
+# in-flight chunked uploads
+/.uploads-tmp
