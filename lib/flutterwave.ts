@@ -13,8 +13,14 @@ import { randomUUID } from "crypto";
 // Sandbox and production are separate environments with their own credentials;
 // a charge created in one is invisible to the other. Default to sandbox so a
 // missing env var can never take real money.
-const FLW_API_BASE_URL =
-  process.env.FLW_API_BASE_URL || "https://developersandbox-api.flutterwave.com";
+//   sandbox:    https://developersandbox-api.flutterwave.com
+//   production: https://f4bexperience.flutterwave.com
+// The docs print the production URL with a trailing slash; left on, every path
+// below would be requested as `//orchestration/...`, so normalise it here
+// rather than trusting whoever writes the env file to omit it.
+const FLW_API_BASE_URL = (
+  process.env.FLW_API_BASE_URL || "https://developersandbox-api.flutterwave.com"
+).replace(/\/+$/, "");
 const FLW_OAUTH_TOKEN_URL =
   process.env.FLW_OAUTH_TOKEN_URL ||
   "https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token";
@@ -34,6 +40,25 @@ const ZM_COUNTRY_CODE = "260";
 /** Networks Flutterwave settles ZMW mobile money through. */
 export const FLW_NETWORKS = ["MTN", "AIRTEL", "ZAMTEL"] as const;
 export type FlutterwaveNetwork = (typeof FLW_NETWORKS)[number];
+
+/**
+ * The network code payouts go out on.
+ *
+ * Collections name the carrier (MTN / AIRTEL / ZAMTEL); transfers do not — the
+ * mobile money transfers table lists exactly one network per destination
+ * currency, and for ZMW that is `MPS`, an aggregator that reaches all three
+ * carriers. Sending "MTN" here is rejected outright.
+ * https://developer.flutterwave.com/docs/mobile-money-1
+ */
+export const FLW_PAYOUT_NETWORK = process.env.FLW_PAYOUT_NETWORK || "MPS";
+
+/**
+ * The balance payouts are debited from. Same currency as the destination for a
+ * domestic ZMW payout, so no conversion happens; override only if the merchant
+ * account funds Zambian wallets out of another currency's balance.
+ */
+export const FLW_PAYOUT_SOURCE_CURRENCY =
+  process.env.FLW_PAYOUT_SOURCE_CURRENCY || FLW_CURRENCY;
 
 /** Zambian mobile prefixes, in national form (leading zero stripped). */
 const NETWORK_PREFIXES: Record<FlutterwaveNetwork, string[]> = {
@@ -354,6 +379,157 @@ export function chargeMatchesPayment(
 }
 
 /* -------------------------------------------------------------------------- */
+/* Transfers (payouts)                                                         */
+/* -------------------------------------------------------------------------- */
+
+// Paying a creator is the mirror of collecting a subscription, with one extra
+// wrinkle: the money leaves our Flutterwave balance the moment the transfer is
+// accepted, so nothing here may run without an admin having approved the payout
+// first (see lib/payouts.ts). As with charges we take no webhooks — a transfer
+// is only believed to have landed once `GET /transfers/{id}` says SUCCESSFUL.
+// https://developer.flutterwave.com/docs/mobile-money-1
+
+/**
+ * Transfer lifecycle. `NEW` is what creating a transfer always returns: it
+ * means accepted for processing, never delivered. `INITIATED` and `PENDING` are
+ * the in-flight states between that and a final SUCCESSFUL / FAILED /
+ * CANCELLED.
+ */
+export type TransferStatus =
+  | "NEW"
+  | "INITIATED"
+  | "PENDING"
+  | "SUCCESSFUL"
+  | "FAILED"
+  | "CANCELLED";
+
+export interface FlutterwaveTransfer {
+  id: string;
+  reference?: string;
+  status: TransferStatus;
+  type?: string;
+  action?: string;
+  narration?: string;
+  source_currency?: string;
+  destination_currency?: string;
+  amount?: { value?: number; applies_to?: string };
+  recipient?: {
+    type?: string;
+    id?: string;
+    name?: { first?: string; last?: string };
+    currency?: string;
+    mobile_money?: { network?: string; msisdn?: string; country?: string };
+  } | null;
+  complete_message?: string;
+  created_datetime?: string;
+}
+
+export interface CreateMobileMoneyTransferInput {
+  reference: string;
+  amount: number;
+  /** The currency the recipient is paid in — the `amount` is denominated in it. */
+  destinationCurrency: string;
+  /** National or international form; normalised to a country-code MSISDN. */
+  phoneNumber: string;
+  name: { first: string; last?: string };
+  /** Shown on the recipient's statement. */
+  narration?: string;
+}
+
+/**
+ * POST /direct-transfers
+ *
+ * Sends money to a mobile money wallet in one call, creating the recipient
+ * inline. Returns with `status: "NEW"` — accepted, not delivered — so the
+ * caller must go on to poll `retrieveTransfer`.
+ *
+ * `amount.applies_to` is `destination_currency`, which pins the figure to what
+ * the creator receives: on a cross-currency payout it is our source balance
+ * that flexes with the rate, never the amount they were promised.
+ */
+export async function createMobileMoneyTransfer(
+  input: CreateMobileMoneyTransferInput
+): Promise<FlutterwaveTransfer> {
+  const { httpStatus, payload } = await flutterwaveRequest<FlutterwaveTransfer>({
+    method: "POST",
+    path: "/direct-transfers",
+    idempotencyKey: input.reference,
+    body: {
+      action: "instant",
+      type: "mobile_money",
+      reference: input.reference,
+      ...(input.narration ? { narration: input.narration.slice(0, 100) } : {}),
+      payment_instruction: {
+        source_currency: FLW_PAYOUT_SOURCE_CURRENCY,
+        destination_currency: input.destinationCurrency,
+        amount: {
+          applies_to: "destination_currency",
+          value: input.amount,
+        },
+        recipient: {
+          name: input.name,
+          mobile_money: {
+            network: FLW_PAYOUT_NETWORK,
+            // Unlike a charge, a transfer takes no separate country code — the
+            // MSISDN itself has to carry it.
+            msisdn: toInternationalNumber(input.phoneNumber),
+          },
+        },
+      },
+    },
+  });
+
+  if (httpStatus >= 400 || !payload.data?.id) {
+    console.error(`Flutterwave transfer failed (${httpStatus}):`, JSON.stringify(payload));
+    throw new FlutterwaveError(
+      errorMessage(payload, "The payout could not be sent. Please try again."),
+      httpStatus === 422 || httpStatus === 400 ? 400 : 502
+    );
+  }
+
+  return payload.data;
+}
+
+/**
+ * GET /transfers/:id
+ *
+ * Returns null when Flutterwave has no record of the transfer. Note it answers
+ * a missing transfer with 400 `TRANSFER_NOT_FOUND` rather than a 404, so both
+ * are treated as "not there".
+ */
+export async function retrieveTransfer(transferId: string): Promise<FlutterwaveTransfer | null> {
+  const { httpStatus, payload } = await flutterwaveRequest<FlutterwaveTransfer>({
+    method: "GET",
+    path: `/transfers/${encodeURIComponent(transferId)}`,
+  });
+
+  if (httpStatus === 404 || payload.error?.type === "TRANSFER_NOT_FOUND") return null;
+
+  if (httpStatus >= 400) {
+    console.error(`Flutterwave transfer lookup failed (${httpStatus}):`, JSON.stringify(payload));
+    throw new FlutterwaveError("Could not reach Flutterwave to confirm this payout.", 502);
+  }
+
+  return payload.data ?? null;
+}
+
+export function isSettledTransferStatus(status: TransferStatus) {
+  return status === "SUCCESSFUL";
+}
+
+export function isFailedTransferStatus(status: TransferStatus) {
+  return status === "FAILED" || status === "CANCELLED";
+}
+
+/** A creator-facing explanation for a transfer that did not land, when there is one. */
+export function transferFailureReason(transfer: FlutterwaveTransfer) {
+  return (
+    transfer.complete_message ||
+    (transfer.status === "CANCELLED" ? "The payout was cancelled before it was paid out." : null)
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* References, phone numbers, networks                                         */
 /* -------------------------------------------------------------------------- */
 
@@ -361,6 +537,12 @@ export function chargeMatchesPayment(
 export function generatePaymentReference(userId: bigint | string) {
   const random = Math.random().toString(36).slice(2, 10);
   return `tambako-${userId}-${Date.now()}-${random}`;
+}
+
+/** Same shape as a payment reference, but never collides with one. */
+export function generatePayoutReference(providerId: bigint | string) {
+  const random = Math.random().toString(36).slice(2, 10);
+  return `tambako-payout-${providerId}-${Date.now()}-${random}`;
 }
 
 export function isValidReference(reference: string) {
@@ -377,6 +559,16 @@ export function toNationalNumber(phone: string) {
   if (digits.startsWith(ZM_COUNTRY_CODE)) return digits.slice(ZM_COUNTRY_CODE.length);
   if (digits.startsWith("0")) return digits.slice(1);
   return digits;
+}
+
+/**
+ * The same number in the form transfers want: the 9 national digits behind the
+ * country code, as one string — `0966123456` becomes `260966123456`. The
+ * transfers API has no separate country_code field, so an MSISDN that does not
+ * start with one is delivered nowhere.
+ */
+export function toInternationalNumber(phone: string) {
+  return `${ZM_COUNTRY_CODE}${toNationalNumber(phone)}`;
 }
 
 export function isValidZambianNumber(phone: string) {

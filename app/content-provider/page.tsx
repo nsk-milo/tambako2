@@ -8,7 +8,7 @@ import { getClientUser } from "@/lib/http";
 import type { UserPayload } from "@/lib/auth";
 import ContentProviderUploadClient from "@/app/content-provider/ContentProviderUploadClient";
 import ContentProviderContentListClient from "@/app/content-provider/ContentProviderContentListClient";
-import ContentProviderWithdrawalClient from "@/app/content-provider/ContentProviderWithdrawalClient";
+import ContentProviderPayoutClient from "@/app/content-provider/ContentProviderPayoutClient";
 
 type ContentItem = {
   id: string;
@@ -202,7 +202,7 @@ export default function ContentProvider() {
             <ContentProviderUploadClient />
           </div>
 
-          <ContentProviderWithdrawalClient />
+          <ContentProviderPayoutClient />
 
           {/* Content Performance Section */}
           <div>

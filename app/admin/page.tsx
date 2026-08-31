@@ -4,6 +4,7 @@ import React, { useState, useEffect } from "react";
 import axios from "axios";
 import { clearToken } from "@/lib/http";
 import { uploadAll, type UploadEntry } from "@/lib/upload-client";
+import AdminPayoutsClient from "@/app/admin/AdminPayoutsClient";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +49,7 @@ import {
   Trash2,
   List,
   LogOut,
+  Wallet,
 } from "lucide-react";
 
 interface MediaUpload {
@@ -309,7 +311,14 @@ interface AdminAnalyticsResponse {
 
 // Mock Data - Remove this once connected to Prisma
 
-type AdminSection = "upload" | "subscriptions" | "analytics" | "delete" | "plans" | "support";
+type AdminSection =
+  | "upload"
+  | "subscriptions"
+  | "analytics"
+  | "delete"
+  | "plans"
+  | "payouts"
+  | "support";
 
 export default function AdminPage() {
   const [activeSection, setActiveSection] = useState<AdminSection>("upload");
@@ -1112,6 +1121,7 @@ export default function AdminPage() {
     { id: "subscriptions", label: "User Subscriptions", icon: Users },
     { id: "plans", label: "Available Plans", icon: List },
     { id: "analytics", label: "Analytics", icon: BarChart3 },
+    { id: "payouts", label: "Creator Payouts", icon: Wallet },
     { id: "support", label: "Support Tools", icon: Users },
     { id: "delete", label: "Delete Media", icon: Trash2 },
   ];
@@ -2767,6 +2777,8 @@ export default function AdminPage() {
                   </CardContent>
                 </Card>
               )}
+
+              {activeSection === "payouts" && <AdminPayoutsClient />}
 
               {activeSection === "support" && (
                 <Card className="border border-white/10 bg-background/30 backdrop-blur-lg">

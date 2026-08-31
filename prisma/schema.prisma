@@ -194,6 +194,8 @@ model users {
   payments           payments[]
   role               Role?                @relation(fields: [roleId], references: [id])
   roleId             Int?
+  payouts            payouts[]            @relation("payout_provider")
+  reviewed_payouts   payouts[]            @relation("payout_reviewer")
 }
 
 model transactions {
@@ -236,6 +238,50 @@ model activity_logs {
   details     String?  @db.VarChar(255)
   created_at  DateTime @default(now()) @db.Timestamp(6)
   users       users    @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// One creator cash-out, from the moment it is asked for to the moment the
+/// money lands. A creator never disburses straight off their balance: they
+/// request, an admin approves, and only then can the transfer be sent — so
+/// `status` walks
+///   requested -> approved -> processing -> paid
+/// with `rejected` (admin said no) and `failed` (Flutterwave refused, or the
+/// wallet bounced it) as the two ways out. Every status except `rejected` and
+/// `failed` holds the amount against the creator's balance, which is what stops
+/// the same earnings being requested twice.
+model payouts {
+  payout_id       BigInt    @id @default(autoincrement())
+  /// Ours, and what we send Flutterwave as the transfer reference.
+  reference       String    @unique @db.VarChar(100)
+  provider_id     BigInt
+  amount          Decimal   @db.Decimal(10, 2)
+  currency        String    @default("ZMW") @db.VarChar(3)
+  status          String    @default("requested") @db.VarChar(20)
+  /// The creator's own carrier — MTN, AIRTEL or ZAMTEL. Kept for the record and
+  /// for support; Flutterwave settles every ZMW wallet through one network code
+  /// of its own (see FLW_PAYOUT_NETWORK in lib/flutterwave.ts).
+  network         String    @db.VarChar(20)
+  /// Destination wallet, stored in national form (`966123456`).
+  phone_number    String    @db.VarChar(20)
+  /// Name on the mobile money wallet, which need not be the account name.
+  account_name    String    @db.VarChar(100)
+  /// Flutterwave's own transfer id (`trf_...`), once the transfer is sent.
+  transfer_id     String?   @unique @db.VarChar(60)
+  /// Flutterwave's last word on the transfer: NEW, PENDING, SUCCESSFUL, ...
+  transfer_status String?   @db.VarChar(20)
+  failure_reason  String?   @db.VarChar(255)
+  /// Why an admin rejected it, shown back to the creator.
+  admin_note      String?   @db.VarChar(255)
+  reviewed_by     BigInt?
+  reviewed_at     DateTime? @db.Timestamp(6)
+  paid_at         DateTime? @db.Timestamp(6)
+  created_at      DateTime  @default(now()) @db.Timestamp(6)
+  updated_at      DateTime  @default(now()) @updatedAt @db.Timestamp(6)
+  provider        users     @relation("payout_provider", fields: [provider_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction)
+  reviewer        users?    @relation("payout_reviewer", fields: [reviewed_by], references: [user_id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([provider_id, status])
+  @@index([status, created_at])
 }
 
 model Role {
