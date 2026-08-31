@@ -11,7 +11,8 @@
     "prisma": "prisma",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "seed:earnings": "node scripts/seed-creator-earnings.js"
   },
   "dependencies": {
     "@prisma/client": "^6.14.0",
