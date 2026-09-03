@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Logo } from "@/components/logo"
 import axios from "axios"
+import { setToken } from "@/lib/http"
 import Link from "next/link"
 
 export default function AdminLoginPage() {
@@ -23,7 +24,10 @@ export default function AdminLoginPage() {
     setError(null)
 
     try {
-      await axios.post("/api/admin/login", { email, password })
+      const { data } = await axios.post("/api/admin/login", { email, password })
+      // Cookie-free session: hold the JWT so the axios interceptor can send it
+      // as `Authorization: Bearer` on every admin API call.
+      if (data?.token) setToken(data.token)
       router.push("/admin")
       router.refresh() // Ensures server components re-render with new auth state
     } catch (err) {
